@@ -1,57 +1,67 @@
 {
   "type": "FeatureCollection",
+  "_note": "Real Somerville, MA intersections used as hardcoded fallback when Cyvl API is unavailable. Curb polygons are approximate — replace with API geometry when connected.",
   "features": [
     {
       "type": "Feature",
       "properties": {
-        "id": "intersection-001",
-        "name": "Main St & Oak Ave (Tight Right Turn)",
-        "description": "Narrow right turn — curb radius ~15ft, fails WB-67 and fire ladder"
+        "id": "somerville-medford-pearl",
+        "name": "Medford St & Pearl St (Tight Right Turn)",
+        "description": "Narrow right turn onto Pearl St — historically difficult for fire apparatus",
+        "curb_radius_ft": 14,
+        "clearance_height_m": null,
+        "encroachments": []
       },
       "geometry": {
         "type": "Polygon",
         "coordinates": [[
-          [-122.4194, 37.7749],
-          [-122.4190, 37.7749],
-          [-122.4190, 37.7753],
-          [-122.4194, 37.7753],
-          [-122.4194, 37.7749]
+          [-71.0997, 42.3823],
+          [-71.0993, 42.3823],
+          [-71.0993, 42.3827],
+          [-71.0997, 42.3827],
+          [-71.0997, 42.3823]
         ]]
       }
     },
     {
       "type": "Feature",
       "properties": {
-        "id": "intersection-002",
-        "name": "Broad St & 5th Ave (Wide Intersection)",
-        "description": "Standard intersection — 35ft curb radius, passes most vehicles"
+        "id": "somerville-holland-broadway",
+        "name": "Holland St & Broadway (Davis Square)",
+        "description": "Moderate turn — 28ft curb radius, standard bus route",
+        "curb_radius_ft": 28,
+        "clearance_height_m": null,
+        "encroachments": []
       },
       "geometry": {
         "type": "Polygon",
         "coordinates": [[
-          [-122.4180, 37.7745],
-          [-122.4174, 37.7745],
-          [-122.4174, 37.7751],
-          [-122.4180, 37.7751],
-          [-122.4180, 37.7745]
+          [-71.1218, 42.3965],
+          [-71.1212, 42.3965],
+          [-71.1212, 42.3970],
+          [-71.1218, 42.3970],
+          [-71.1218, 42.3965]
         ]]
       }
     },
     {
       "type": "Feature",
       "properties": {
-        "id": "intersection-003",
-        "name": "Industrial Blvd & Depot Rd (Overhead Obstruction)",
-        "description": "Low overpass — 13.5ft clearance, tree encroachment on right"
+        "id": "somerville-mcgrath-washington",
+        "name": "McGrath Hwy & Washington St",
+        "description": "Wide arterial intersection — large curb radius, clear of obstructions",
+        "curb_radius_ft": 38,
+        "clearance_height_m": null,
+        "encroachments": []
       },
       "geometry": {
         "type": "Polygon",
         "coordinates": [[
-          [-122.4165, 37.7740],
-          [-122.4158, 37.7740],
-          [-122.4158, 37.7746],
-          [-122.4165, 37.7746],
-          [-122.4165, 37.7740]
+          [-71.0950, 42.3815],
+          [-71.0942, 42.3815],
+          [-71.0942, 42.3821],
+          [-71.0950, 42.3821],
+          [-71.0950, 42.3815]
         ]]
       }
     }
