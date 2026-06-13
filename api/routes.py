@@ -13,8 +13,14 @@ shapefiles (see routing/cyvl_graph.py). Plus thin Cyvl pass-throughs for the
 optional data overlays.
 """
 from __future__ import annotations
+import hashlib
+import io
 import os
+import urllib.parse
+import urllib.request
+from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from data.loaders import load_vehicle_templates
@@ -249,3 +255,82 @@ def cyvl_pavement(lon: float = Query(...), lat: float = Query(...), radius_m: fl
     _require_cyvl()
     from data.cyvl_client import get_pavement_scores, radius_filter
     return get_pavement_scores(SOMERVILLE_PROJECT_ID, radius_filter(lat, lon, radius_m))
+
+
+@router.get("/intersection/imagery")
+def intersection_imagery(
+    lon: float = Query(...),
+    lat: float = Query(...),
+    radius_m: float = Query(30),
+    verdict: str | None = Query(None),     # "fail" | "tight" — tunes the search query
+):
+    """
+    Street-level photos near a failing/tight turn so the user can *see* the
+    obstruction. Each failure point gets a real, high-quality 3D/360° photo.
+
+    Source order:
+      1. Bundled Cyvl imagery shapefiles in data/ (no API key needed) — the
+         nearest 360° panoramic frame to the turn. This always works.
+      2. If that finds nothing, live Cyvl semantic search (when a key is set).
+
+    Best-effort: returns {"images": []} if nothing is found, so the UI degrades
+    gracefully.
+    """
+    from data.local_imagery import nearby_imagery as local_imagery
+    # Local 360° frames keyed by proximity — the "3D high quality photo" of the
+    # exact spot the swept path fails.
+    images = local_imagery(lat, lon, radius_m=max(radius_m, 40), limit=2, layer="panoramic")
+
+    if not images and _USE_CYVL:
+        from data.cyvl_client import nearby_imagery as cyvl_imagery
+        query = "narrow intersection corner with curb and obstructions blocking a wide turn"
+        if verdict == "tight":
+            query = "tight street corner with curb, parked cars, and roadside objects"
+        images = cyvl_imagery(SOMERVILLE_PROJECT_ID, lat, lon, radius_m=radius_m, query=query)
+
+    return {"images": images}
+
+
+# ── Thumbnail proxy ───────────────────────────────────────────────────────────
+# The bundled 360° frames are full-resolution equirectangular jpgs (~3-4 MB
+# each). Loading several of those raw as <img> thumbnails is what makes the
+# "Loading site photos…" spinner hang. This downloads each frame once, resizes
+# it small, caches it to disk, and serves the lightweight version — so repeat
+# views are instant.
+
+_THUMB_CACHE = Path(__file__).parent.parent / "data" / ".thumb_cache"
+_THUMB_HOSTS = ("cloudfront.net", "cyvl.ai", "cyvl.app")
+
+
+@router.get("/intersection/photo-thumb")
+def photo_thumb(url: str = Query(...), w: int = Query(480, ge=64, le=1024)):
+    """Resized, disk-cached thumbnail of a remote frame jpg."""
+    host = urllib.parse.urlparse(url).hostname or ""
+    if not url.startswith("https://") or not any(host.endswith(h) for h in _THUMB_HOSTS):
+        raise HTTPException(400, "URL not allowed")
+
+    _THUMB_CACHE.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha1(f"{url}|{w}".encode()).hexdigest()
+    cache_file = _THUMB_CACHE / f"{key}.jpg"
+    if cache_file.exists():
+        return Response(cache_file.read_bytes(), media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+    try:
+        from PIL import Image
+        req = urllib.request.Request(url, headers={"User-Agent": "ClearPath/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read()
+        img = Image.open(io.BytesIO(raw))
+        img = img.convert("RGB")
+        if img.width > w:
+            img = img.resize((w, max(1, round(img.height * w / img.width))), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=80, optimize=True)
+        data = buf.getvalue()
+    except Exception as e:
+        raise HTTPException(502, f"Could not fetch image: {e}")
+
+    cache_file.write_bytes(data)
+    return Response(data, media_type="image/jpeg",
+                    headers={"Cache-Control": "public, max-age=86400"})

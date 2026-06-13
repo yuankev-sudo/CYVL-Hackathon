@@ -197,7 +197,30 @@ function renderRoutes(data) {
     (data.blocked_intersections || []).filter(b => b.verdict !== "pass").forEach(b => {
       const color = b.verdict === "fail" ? "#ef4444" : "#f59e0b";
       const circle = L.circleMarker([b.lat, b.lon], { radius: 8, color, fillColor: color, fillOpacity: 0.9, weight: 2 })
-        .addTo(map).bindPopup(`<b>${b.verdict.toUpperCase()}</b><br>${b.reason || ""}`);
+        .addTo(map).bindPopup(
+          `<b>${b.verdict.toUpperCase()}</b><br>${b.reason || ""}<div class="popup-photos">Loading site photos…</div>`,
+          { maxWidth: 260 });
+      // Fill in the photo(s) the first time the popup opens.
+      circle.on("popupopen", async ev => {
+        const host = ev.popup.getElement().querySelector(".popup-photos");
+        if (!host || host.dataset.loaded) return;
+        host.dataset.loaded = "1";
+        try {
+          const r = await fetch(`/api/intersection/imagery?lon=${b.lon}&lat=${b.lat}&verdict=${b.verdict}`);
+          const { images = [] } = r.ok ? await r.json() : {};
+          if (!images.length) { host.remove(); return; }
+          host.innerHTML = "";
+          const im = images[0];
+          const t = document.createElement("img");
+          t.src = thumbSrc(im, 480);
+          t.alt = im.caption || "Intersection photo";
+          t.title = im.viewer_url ? "Open interactive 3D view" : "Open full photo";
+          if (im.viewer_url) t.classList.add("is-3d");
+          t.addEventListener("click", () => openPhoto(im));
+          host.appendChild(t);
+          ev.popup.update();
+        } catch (_) { host.remove(); }
+      });
       blockedLayers.push(circle);
     });
   }
@@ -258,11 +281,66 @@ function renderResults(data) {
       card.innerHTML = `<div class="name">Intersection ${b.node_id.slice(0, 8)}</div>
         <span class="badge ${b.verdict}">${b.verdict}</span>
         <div class="reason">${b.reason || ""}</div>
-        <div class="reason coords">${b.lat.toFixed(5)}, ${b.lon.toFixed(5)}</div>`;
-      card.addEventListener("click", () => map.setView([b.lat, b.lon], 17));
+        <div class="reason coords">${b.lat.toFixed(5)}, ${b.lon.toFixed(5)}</div>
+        <div class="photos" aria-live="polite"></div>`;
+      // Center the map when the card body is clicked (but not when a photo is).
+      card.addEventListener("click", e => { if (!e.target.closest(".photos")) map.setView([b.lat, b.lon], 17); });
       el.appendChild(card);
+      loadCardImagery(card.querySelector(".photos"), b);
     });
   }
+}
+
+// Lazily fetch street-level photos of why a turn fails and append thumbnails.
+async function loadCardImagery(host, b) {
+  if (!host) return;
+  host.innerHTML = `<span class="photos-status">Loading site photos…</span>`;
+  try {
+    const res = await fetch(`/api/intersection/imagery?lon=${b.lon}&lat=${b.lat}&verdict=${b.verdict}`);
+    const { images = [] } = res.ok ? await res.json() : {};
+    if (!images.length) { host.innerHTML = ""; return; }
+    const has3d = images.some(img => img.viewer_url);
+    host.innerHTML = `<div class="photos-label">${has3d ? "3D site photos" : "Site photos"} — why this turn fails</div>`;
+    const strip = document.createElement("div");
+    strip.className = "photo-strip";
+    images.forEach(img => {
+      const t = document.createElement("img");
+      t.src = thumbSrc(img, 240);
+      t.loading = "lazy";
+      t.alt = img.caption || "Intersection street-level photo";
+      t.title = img.viewer_url ? "Open interactive 3D view" : (img.caption || "Open full photo");
+      if (img.viewer_url) t.classList.add("is-3d");
+      t.addEventListener("click", e => { e.stopPropagation(); openPhoto(img); });
+      strip.appendChild(t);
+    });
+    host.appendChild(strip);
+  } catch (_) { host.innerHTML = ""; }
+}
+
+// Route a frame's jpg through the backend resize+cache proxy so the big
+// full-res 360° images don't have to download raw as thumbnails.
+function thumbSrc(img, w) {
+  const raw = img.thumb || img.url;
+  return `/api/intersection/photo-thumb?w=${w}&url=${encodeURIComponent(raw)}`;
+}
+
+// Open a frame: interactive 3D/360° viewer when available, else flat lightbox.
+function openPhoto(img) {
+  if (img && img.viewer_url) {
+    window.open(img.viewer_url, "_blank", "noopener");
+    return;
+  }
+  openLightbox(img.url, img.caption);
+}
+
+// Minimal fullscreen photo viewer.
+function openLightbox(url, caption) {
+  const ov = document.createElement("div");
+  ov.className = "lightbox";
+  ov.innerHTML = `<figure><img src="${url}" alt="${caption || ""}">
+    ${caption ? `<figcaption>${caption}</figcaption>` : ""}</figure>`;
+  ov.addEventListener("click", () => ov.remove());
+  document.body.appendChild(ov);
 }
 
 // ── Clear ──────────────────────────────────────────────────────────────────────
