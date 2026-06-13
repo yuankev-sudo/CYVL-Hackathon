@@ -1,41 +1,72 @@
 """
-Extract curb lines and lane edges from a LiDAR point cloud.
-Falls back to reading pre-computed GeoJSON when no point cloud is provided.
+Intersection geometry model + loaders.
+
+An IntersectionGeometry describes the *measured pavement reality* at one
+intersection — the things a swept-path check needs:
+
+  - corner_radius_ft : the curb-return radius the vehicle pivots around
+                       (small = tight corner). From LiDAR/Cyvl curb assets.
+  - road_width_ft    : curb-to-curb width of the receiving street. Bounds how
+                       far the vehicle's body can legally swing.
+  - obstacles        : point objects (poles, signals, hydrants, trees) inside
+                       the corner that the swept path can clip.
+  - pci              : pavement condition score (0-100) for the smoothness profile.
+
+The LiDAR / point-cloud extractor (`extract_from_point_cloud`) and the Cyvl
+API builder (`geometry.from_cyvl`) both produce this same struct, so the swept
+path + routing layers never care where the geometry came from.
 """
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-import json
-import numpy as np
+
 
 @dataclass
 class IntersectionGeometry:
     intersection_id: str
-    curb_polygon: list[tuple[float, float]]   # exterior curb as (x,y) pairs (metres or degrees)
-    lane_edges: list[list[tuple[float, float]]]
-    clearance_height_m: float | None = None    # None means unrestricted
-    encroachments: list[dict] | None = None    # objects in the swept zone
+    lon: float
+    lat: float
+    corner_radius_ft: float            # curb-return radius (pivot)
+    road_width_ft: float               # curb-to-curb width of receiving street
+    turn_angle_deg: float = 90.0       # turn sharpness at this node
+    pci: float | None = None           # pavement condition 0-100
+    obstacles: list[dict] = field(default_factory=list)   # {type, lon, lat}
+    name: str = ""
+    source: str = "stub"               # "lidar" | "cyvl" | "stub"
+
+    @property
+    def available_radius_ft(self) -> float:
+        """Widest outer radius a vehicle may use before crossing the far curb."""
+        return self.corner_radius_ft + self.road_width_ft
 
 
 def extract_from_point_cloud(las_data, intersection_id: str) -> IntersectionGeometry:
     """
-    Segment ground / curb returns and fit a polygon.
-    Requires open3d + laspy.  This is the NVIDIA-accelerated path.
+    NVIDIA-accelerated path: classify ground/curb returns, fit curb lines, and
+    measure the corner-return radius + road width. Not wired for the MVP demo.
     """
-    # TODO: classify returns, RANSAC plane fit, alpha-shape curb outline
     raise NotImplementedError("Point-cloud extraction not yet implemented")
 
 
 def load_from_geojson(feature: dict) -> IntersectionGeometry:
-    """Parse a GeoJSON Feature into IntersectionGeometry (demo path)."""
+    """Parse a GeoJSON Feature (sample_intersections.geojson) into geometry."""
     props = feature["properties"]
-    coords = feature["geometry"]["coordinates"][0]
+    geom = feature.get("geometry", {})
+    coords = geom.get("coordinates", [[[0, 0]]])
+    ring = coords[0] if geom.get("type") == "Polygon" else [[props.get("lon", 0), props.get("lat", 0)]]
+    lon = props.get("lon") or sum(c[0] for c in ring) / len(ring)
+    lat = props.get("lat") or sum(c[1] for c in ring) / len(ring)
     return IntersectionGeometry(
         intersection_id=props["id"],
-        curb_polygon=[(c[0], c[1]) for c in coords],
-        lane_edges=[],
-        clearance_height_m=props.get("clearance_height_m"),
-        encroachments=props.get("encroachments", []),
+        lon=lon,
+        lat=lat,
+        corner_radius_ft=float(props.get("corner_radius_ft", props.get("curb_radius_ft", 25))),
+        road_width_ft=float(props.get("road_width_ft", 24)),
+        turn_angle_deg=float(props.get("turn_angle_deg", 90)),
+        pci=props.get("pci"),
+        obstacles=props.get("obstacles", props.get("encroachments", [])),
+        name=props.get("name", props["id"]),
+        source="stub",
     )
 
 
@@ -46,6 +77,7 @@ def load_all_from_geojson(path: Path | None = None) -> list[IntersectionGeometry
 
 
 if __name__ == "__main__":
-    geometries = load_all_from_geojson()
-    for g in geometries:
-        print(f"{g.intersection_id}: {len(g.curb_polygon)} curb vertices")
+    for g in load_all_from_geojson():
+        print(f"{g.intersection_id:32s} corner={g.corner_radius_ft:>4}ft "
+              f"road={g.road_width_ft:>4}ft available={g.available_radius_ft:>5}ft "
+              f"pci={g.pci}")

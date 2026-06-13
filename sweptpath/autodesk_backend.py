@@ -41,10 +41,10 @@ def _get_aps_token() -> str:
 def compute_swept_path(
     geometry: IntersectionGeometry,
     vehicle: dict,
-    turn_angle_deg: float = 90.0,
+    turn_angle_deg: float | None = None,
 ) -> SweptPathResult:
     if not _aps_available():
-        logger.warning("APS credentials not set — falling back to shapely backend")
+        logger.debug("APS credentials not set — using shapely backend")
         return shapely_backend.compute_swept_path(geometry, vehicle, turn_angle_deg)
 
     try:

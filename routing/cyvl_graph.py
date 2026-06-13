@@ -206,20 +206,22 @@ class Graph:
         self,
         node_path: list[str],
         vehicle: dict,
+        obstacles: list[tuple[float, float]] | None = None,
     ) -> list[dict]:
         """
         For each intersection node (degree >= 3) along node_path, check whether
-        the vehicle can make the sharpest turn using road geometry from edge metadata.
+        the vehicle can make the turn using road geometry + optional LiDAR obstacles.
+
+        obstacles: list of (lon, lat) for trees / utility poles from above-ground assets.
         Returns list of {node_id, verdict, reason, lon, lat}.
         """
         isect_set = set(self.intersection_nodes())
+        _obstacles = obstacles or []
         results = []
         for i, node_id in enumerate(node_path):
             if node_id not in isect_set:
                 continue
-            # Find the entry and exit edges at this node
-            entry_edge = None
-            exit_edge = None
+            entry_edge = exit_edge = None
             if i > 0:
                 prev_id = node_path[i - 1]
                 entry_edge = self.edge_meta.get((prev_id, node_id)) or self.edge_meta.get((node_id, prev_id))
@@ -230,8 +232,13 @@ class Graph:
             if not entry_edge or not exit_edge:
                 continue
 
-            verdict, reason = _check_turn(entry_edge, exit_edge, node_id, vehicle)
             node = self.nodes[node_id]
+            nearest_obs = _nearest_obstacle_m(node.lon, node.lat, _obstacles) if _obstacles else None
+            verdict, reason = _check_turn(
+                entry_edge, exit_edge, node.lon, node.lat, vehicle,
+                nearest_obstacle_m=nearest_obs,
+            )
+
             results.append({
                 "node_id": node_id,
                 "verdict": verdict,
@@ -254,74 +261,133 @@ def _vec(p1: tuple[float, float], p2: tuple[float, float]) -> tuple[float, float
 def _turn_deviation_deg(
     entry_pts: list[tuple[float, float]],
     exit_pts: list[tuple[float, float]],
-    node_id: str,
+    node_lon: float,
+    node_lat: float,
 ) -> float:
     """
-    Compute how sharp the turn is in degrees (0=straight, 90=right angle, 180=U-turn).
-    entry_pts: points of the entry edge (last point = intersection node)
-    exit_pts: points of the exit edge (first point = intersection node)
+    Turn sharpness in degrees: 0=straight through, 90=right-angle, 180=U-turn.
+    Uses node coordinates to correctly orient both edge polylines — avoids
+    the broken float-equality comparison that caused most edges to read reversed.
     """
-    # Entry direction: vector approaching the node
-    entry_pts_ordered = entry_pts if entry_pts[-1] == exit_pts[0] else list(reversed(entry_pts))
-    exit_pts_ordered = exit_pts if exit_pts[0] == entry_pts_ordered[-1] else list(reversed(exit_pts))
+    # Orient entry so its LAST point is closest to the node (truck approaches node)
+    entry = list(entry_pts)
+    if (math.hypot(entry[-1][0] - node_lon, entry[-1][1] - node_lat) >
+            math.hypot(entry[0][0]  - node_lon, entry[0][1]  - node_lat)):
+        entry = entry[::-1]
 
-    if len(entry_pts_ordered) < 2 or len(exit_pts_ordered) < 2:
+    # Orient exit so its FIRST point is closest to the node (truck departs from node)
+    exit_ = list(exit_pts)
+    if (math.hypot(exit_[0][0]  - node_lon, exit_[0][1]  - node_lat) >
+            math.hypot(exit_[-1][0] - node_lon, exit_[-1][1] - node_lat)):
+        exit_ = exit_[::-1]
+
+    if len(entry) < 2 or len(exit_) < 2:
         return 0.0
 
-    entry_vec = _vec(entry_pts_ordered[-2], entry_pts_ordered[-1])
-    exit_vec = _vec(exit_pts_ordered[0], exit_pts_ordered[1])
+    entry_vec = (entry[-1][0] - entry[-2][0], entry[-1][1] - entry[-2][1])  # towards node
+    exit_vec  = (exit_[1][0]  - exit_[0][0],  exit_[1][1]  - exit_[0][1])  # away from node
 
     mag1 = math.hypot(*entry_vec)
     mag2 = math.hypot(*exit_vec)
     if mag1 < 1e-12 or mag2 < 1e-12:
         return 0.0
 
+    # Angle between approach direction and departure direction:
+    # 0° = same direction (straight through), 90° = right-angle turn, 180° = U-turn
     cos_a = (entry_vec[0] * exit_vec[0] + entry_vec[1] * exit_vec[1]) / (mag1 * mag2)
     cos_a = max(-1.0, min(1.0, cos_a))
-    forward_angle = math.degrees(math.acos(cos_a))  # 0 = same direction (straight), 180 = U-turn
-    # Deviation from straight: 0 = straight, 90 = right angle turn
-    return abs(180.0 - forward_angle)
+    return math.degrees(math.acos(cos_a))
+
+
+def _nearest_obstacle_m(
+    node_lon: float,
+    node_lat: float,
+    obstacles: list[tuple[float, float]],
+    search_radius_m: float = 12.0,
+) -> float | None:
+    """
+    Return distance in metres to the nearest obstacle (tree / utility pole)
+    within search_radius_m of the intersection node, or None if clear.
+    Uses LiDAR-derived point positions from above-ground assets.
+    """
+    best = None
+    for olon, olat in obstacles:
+        d = _haversine_m(node_lon, node_lat, olon, olat)
+        if d <= search_radius_m:
+            if best is None or d < best:
+                best = d
+    return best
+
+
+def _road_width_m(edge: "Edge") -> float:
+    """Estimate road width from edge metadata. One-way = 1 lane, two-way = 2 lanes."""
+    LANE_WIDTH_M = 3.65
+    return LANE_WIDTH_M if edge.oneway else LANE_WIDTH_M * 2
 
 
 def _check_turn(
     entry_edge: "Edge",
     exit_edge: "Edge",
-    node_id: str,
+    node_lon: float,
+    node_lat: float,
     vehicle: dict,
+    nearest_obstacle_m: float | None = None,
 ) -> tuple[str, str | None]:
     """
     Return (verdict, reason) for a vehicle making this turn.
-    Uses vehicle turning_radius and an assumed standard road width.
+
+    Road width is derived from edge oneway flag (1 lane for one-way streets,
+    2 lanes for two-way), so narrow residential one-ways correctly produce fails.
+    Obstacle clearance from LiDAR trees/poles further constrains available space.
     """
     FT_TO_M = 0.3048
-    # Standard 2-lane road: 3.65m per lane
-    ROAD_WIDTH_M = 7.3
 
-    deviation = _turn_deviation_deg(entry_edge.points, exit_edge.points, node_id)
+    deviation = _turn_deviation_deg(entry_edge.points, exit_edge.points, node_lon, node_lat)
 
-    if deviation < 10.0:
-        return "pass", None  # essentially straight through
+    if deviation < 20.0:
+        return "pass", None  # straight through or very gentle curve
 
-    r_needed_m = vehicle["turning_radius_ft"] * FT_TO_M
-
-    # Approximate available turning radius from road geometry
-    sin_half = math.sin(math.radians(deviation / 2))
-    available_r_m = ROAD_WIDTH_M / (2.0 * sin_half + 1e-9)
+    if deviation > 165.0:
+        return "fail", f"Near-U-turn ({deviation:.0f}deg) — not feasible for large vehicles"
 
     r_needed_ft = vehicle["turning_radius_ft"]
+    r_needed_m  = r_needed_ft * FT_TO_M
+
+    # Total usable width = approach width + departure width
+    # (truck can use its own lane + adjacent crossing lane)
+    entry_w = _road_width_m(entry_edge)
+    exit_w  = _road_width_m(exit_edge)
+    full_width_m = entry_w + exit_w
+
+    sin_d = math.sin(math.radians(deviation))
+
+    if deviation <= 90.0:
+        available_r_m = full_width_m / (sin_d + 1e-9)
+    else:
+        # Sharper than 90°: progressively less room; linearly reduce to ~0 at 165°
+        factor = (165.0 - deviation) / 75.0
+        available_r_m = full_width_m * factor / (sin_d + 1e-9)
+
+    # If a tree or pole sits within the swept arc, subtract its encroachment
+    if nearest_obstacle_m is not None:
+        # Obstacle effectively reduces the clearance the truck has
+        available_r_m = min(available_r_m, nearest_obstacle_m)
+
     available_r_ft = available_r_m / FT_TO_M
 
     if r_needed_m <= available_r_m:
         return "pass", None
-    elif r_needed_m <= available_r_m * 1.2:
+    elif r_needed_m <= available_r_m * 1.15:
+        obstacle_note = f" (tree/pole at {nearest_obstacle_m/FT_TO_M:.0f}ft)" if nearest_obstacle_m else ""
         return "tight", (
-            f"{deviation:.0f}deg turn: needs {r_needed_ft:.0f}ft radius, "
-            f"{available_r_ft:.0f}ft available — tight"
+            f"{deviation:.0f}deg turn: needs {r_needed_ft:.0f}ft, "
+            f"{available_r_ft:.0f}ft available{obstacle_note}"
         )
     else:
+        obstacle_note = f" (obstacle at {nearest_obstacle_m/FT_TO_M:.0f}ft)" if nearest_obstacle_m else ""
         return "fail", (
-            f"{deviation:.0f}deg turn: needs {r_needed_ft:.0f}ft radius, "
-            f"only {available_r_ft:.0f}ft available"
+            f"{deviation:.0f}deg turn: needs {r_needed_ft:.0f}ft, "
+            f"only {available_r_ft:.0f}ft available{obstacle_note}"
         )
 
 
