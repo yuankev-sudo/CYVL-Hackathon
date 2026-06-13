@@ -3,58 +3,84 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ClearPath — LiDAR-aware routing</title>
+  <title>ClearPath — Turn Feasibility Router</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <link rel="stylesheet" href="/static/css/style.css" />
 </head>
 <body>
-  <div id="map"></div>
-
-  <div id="panel">
+  <div id="sidebar">
     <div class="brand">
       <h1>ClearPath</h1>
-      <span id="source-badge" class="badge-baked">demo data</span>
-    </div>
-    <p class="tagline">Routing off measured pavement reality — not a restriction database.</p>
-
-    <!-- Profile picker, Google-Maps mode-tabs style -->
-    <div id="profiles">
-      <button class="profile active" data-profile="fastest"     title="Shortest travel time">
-        <span class="ico">🚗</span><span>Fastest</span></button>
-      <button class="profile" data-profile="smoothest"          title="Smoothest pavement — for ambulances">
-        <span class="ico">🚑</span><span>Smoothest</span></button>
-      <button class="profile" data-profile="largevehicle"       title="Fits a large vehicle's turns">
-        <span class="ico">🚛</span><span>Large&nbsp;Vehicle</span></button>
+      <p class="subtitle">LiDAR-powered routing for large vehicles</p>
     </div>
 
-    <!-- Trip endpoints -->
-    <div class="field">
-      <label>Start</label>
-      <div class="endpoint origin"><span class="dot green"></span><span id="start-name">Star Market</span></div>
-    </div>
-    <div class="field">
-      <label for="dest-select">Destination</label>
-      <select id="dest-select"></select>
-    </div>
+    <div class="section-label">Vehicle</div>
+    <select id="vehicle-select"></select>
 
-    <!-- Truck dimension form (large vehicle only) -->
-    <div id="truck-form" class="hidden">
-      <div class="field">
-        <label for="preset-select">Vehicle preset</label>
-        <select id="preset-select"></select>
+    <div class="section-label">Route</div>
+    <div class="pin-controls">
+      <button id="btn-set-start" class="pin-btn active" data-mode="start">
+        <span class="pin-dot start-dot"></span> Set Start (A)
+      </button>
+      <button id="btn-set-end" class="pin-btn" data-mode="end">
+        <span class="pin-dot end-dot"></span> Set End (B)
+      </button>
+    </div>
+    <div id="pin-hint" class="hint">Click the map to place Start point</div>
+
+    <div id="pin-summary" class="pin-summary hidden">
+      <div id="start-label" class="pin-row">
+        <span class="pin-dot start-dot"></span>
+        <span id="start-coords" class="pin-coords">—</span>
       </div>
-      <div class="dims">
-        <div><label for="d-length">Length (ft)</label><input id="d-length" type="number" step="0.5"></div>
-        <div><label for="d-width">Width (ft)</label><input id="d-width" type="number" step="0.1"></div>
-        <div><label for="d-wheelbase">Wheelbase (ft)</label><input id="d-wheelbase" type="number" step="0.5"></div>
-        <div><label for="d-radius">Turn radius (ft)</label><input id="d-radius" type="number" step="0.5"></div>
+      <div id="end-label" class="pin-row">
+        <span class="pin-dot end-dot"></span>
+        <span id="end-coords" class="pin-coords">—</span>
       </div>
-      <p class="hint" id="swept-hint"></p>
     </div>
 
-    <button id="go-btn">Get Directions</button>
+    <button id="route-btn" disabled>Find Safe Route</button>
+    <button id="clear-btn" class="secondary">Clear</button>
+
+    <div id="stats-card" class="stats-card hidden">
+      <div class="stats-row">
+        <span class="stats-label">Naive distance</span>
+        <span id="stat-naive-dist" class="stats-val">—</span>
+      </div>
+      <div class="stats-row">
+        <span class="stats-label">Safe distance</span>
+        <span id="stat-safe-dist" class="stats-val">—</span>
+      </div>
+      <div class="stats-row">
+        <span class="stats-label">Intersections checked</span>
+        <span id="stat-isect" class="stats-val">—</span>
+      </div>
+      <div class="stats-row">
+        <span class="stats-label">Blocked turns</span>
+        <span id="stat-blocked" class="stats-val">—</span>
+      </div>
+    </div>
 
     <div id="results"></div>
+
+    <div class="legend">
+      <div class="section-label">Pavement (PCI)</div>
+      <div class="legend-row"><span class="swatch" style="background:#00B050"></span> Good (85–100)</div>
+      <div class="legend-row"><span class="swatch" style="background:#92D050"></span> Satisfactory (70–85)</div>
+      <div class="legend-row"><span class="swatch" style="background:#FFFF00"></span> Fair (55–70)</div>
+      <div class="legend-row"><span class="swatch" style="background:#FFC000"></span> Poor (40–55)</div>
+      <div class="legend-row"><span class="swatch" style="background:#FF0000"></span> Very Poor (25–40)</div>
+      <div class="legend-row"><span class="swatch" style="background:#7030A0"></span> Serious (&lt;25)</div>
+      <div class="legend-row"><span class="swatch" style="background:#aaa"></span> Unscored</div>
+    </div>
+  </div>
+
+  <div id="map-wrap">
+    <div id="map"></div>
+    <div id="loading-overlay" class="hidden">
+      <div class="spinner"></div>
+      <div class="loading-text">Loading road network…</div>
+    </div>
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
