@@ -293,22 +293,29 @@ def _check_turn(
     Return (verdict, reason) for a vehicle making this turn.
     Uses vehicle turning_radius and an assumed standard road width.
     """
+    from geometry.turning import turning_geometry
+
     FT_TO_M = 0.3048
-    # Standard 2-lane road: 3.65m per lane
-    ROAD_WIDTH_M = 7.3
+    # Effective corner width a turning vehicle can use: two travel lanes plus
+    # the receiving roadway and curb-return radii it swings through — not just
+    # the bare lane width. ~12 m matches a typical Somerville collector corner.
+    # (Per-node curb geometry from LiDAR would replace this constant.)
+    ROAD_WIDTH_M = 12.0
 
     deviation = _turn_deviation_deg(entry_edge.points, exit_edge.points, node_id)
 
     if deviation < 10.0:
         return "pass", None  # essentially straight through
 
-    r_needed_m = vehicle["turning_radius_ft"] * FT_TO_M
+    # The widest point of the vehicle (front outer corner) sweeps the OUTER
+    # radius — width + overhang included — so that is what must fit the corner.
+    r_needed_ft = turning_geometry(vehicle).outer_radius_ft
+    r_needed_m = r_needed_ft * FT_TO_M
 
     # Approximate available turning radius from road geometry
     sin_half = math.sin(math.radians(deviation / 2))
     available_r_m = ROAD_WIDTH_M / (2.0 * sin_half + 1e-9)
 
-    r_needed_ft = vehicle["turning_radius_ft"]
     available_r_ft = available_r_m / FT_TO_M
 
     if r_needed_m <= available_r_m:

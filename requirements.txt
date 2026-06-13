@@ -4,6 +4,7 @@ shapely>=2.0.4
 numpy>=1.26.0
 pydantic>=2.7.0
 python-dotenv>=1.0.0
+pyshp>=2.3.1          # reads the Somerville centerline + pavement shapefiles
 
 # Optional — point cloud ingestion (not required for shapely demo)
 # laspy>=2.5.0
