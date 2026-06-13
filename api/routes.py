@@ -275,6 +275,18 @@ def _path_length_m(g, path: list[str] | None) -> int | None:
     return round(total)
 
 
+def _route_points(g, path: list[str] | None) -> list[tuple[float, float]]:
+    """All (lon,lat) vertices along a route path, for spatial proximity tests."""
+    pts: list[tuple[float, float]] = []
+    if not path:
+        return pts
+    for a, b in zip(path, path[1:]):
+        e = g.edge_meta.get((a, b)) or g.edge_meta.get((b, a))
+        if e:
+            pts.extend(e.points)
+    return pts
+
+
 # Average speeds (mph) per profile — reflects realistic urban Somerville pace
 _PROFILE_SPEED_MPH = {
     "fastest":      22,   # normal city driving
@@ -500,12 +512,29 @@ def all_routes(req: AllRoutesRequest):
     for profile, r in routes.items():
         r["sign_warnings"] = _find_route_signs(g, paths[profile], _signs, height_ft)
 
+    # Roughest pavement ON the fastest route, backed by REAL Cyvl distress data
+    # (cracks/potholes + masked photo) — the evidence the Smoothest route avoids.
+    from data.distress import points_near_path
+    fastest_pts = _route_points(g, paths["fastest"])
+    smooth_pts = _route_points(g, paths["smoothest"])
+    from routing.cyvl_graph import _haversine_m
+    rough_points = points_near_path(fastest_pts, max_m=45.0)
+    for rp in rough_points:
+        rp["avoided_by_smoothest"] = not any(
+            _haversine_m(rp["lon"], rp["lat"], x, y) <= 45.0 for x, y in smooth_pts
+        )
+        # The stretch of the fastest route at this rough spot, so the frontend
+        # can draw a bold highlight on the road (not just a pin).
+        near = [[x, y] for x, y in fastest_pts if _haversine_m(rp["lon"], rp["lat"], x, y) <= 55.0]
+        rp["highlight"] = near if len(near) >= 2 else [[rp["lon"], rp["lat"]]]
+
     sn, en = g.nodes[start_node], g.nodes[end_node]
     return {
         "routes":      routes,
         "feasibility": route_feasibility,   # corners on the large-vehicle route
         "avoided":     avoided,             # fail corners the reroute avoided
         "lv_nodes":    lv_path,             # node sequence of the large-vehicle route
+        "rough_points": rough_points,       # roughest pavement on the fastest route (real distress)
         "start": {"node_id": start_node, "lat": sn.lat, "lon": sn.lon},
         "end":   {"node_id": end_node,   "lat": en.lat, "lon": en.lon},
         "vehicle": {

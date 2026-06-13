@@ -19,6 +19,7 @@ let networkLayer  = null;
 let routeLayers   = {};        // { fastest: L.GeoJSON, smoothest: ..., largevehicle: ... }
 let blockedLayers = [];
 let signLayers    = [];
+let roughLayers   = [];
 let lastRouteData = null;
 let VEHICLES      = {};
 
@@ -303,12 +304,61 @@ function renderAllRoutes(data) {
     blockedLayers.push(circle);
   });
 
+  // Rough-pavement evidence on the FASTEST route (real Cyvl distress + photo)
+  renderRoughMarkers(data);
+
   // Sign warnings — show for the active profile's route
   renderSignMarkers(data.routes[activeProfile]?.sign_warnings || []);
 
   // Fit to the active route
   const target = routeLayers[activeProfile];
   if (target) { try { map.fitBounds(target.getBounds().pad(0.15)); } catch (_) {} }
+}
+
+// Clickable roughest-pavement points on the fastest route. Each is a real Cyvl
+// inspection with surveyed distress + a masked photo — proof the PCI is measured.
+function renderRoughMarkers(data) {
+  const rough = data.rough_points || [];
+  const fpci = data.routes?.fastest?.stats?.avg_pci;
+  const spci = data.routes?.smoothest?.stats?.avg_pci;
+
+  rough.forEach(rp => {
+    const icon = L.divIcon({
+      className: "",
+      html: `<div class="rough-pin" title="Rough pavement — PCI ${rp.score}">⚠</div>`,
+      iconSize: [30, 30], iconAnchor: [15, 15], popupAnchor: [0, -14],
+    });
+    const distressRows = (rp.distresses || []).map(d => {
+      const amt = d.qty ? `×${d.qty}` : (d.area_sqft != null ? `${d.area_sqft} ft²` : "");
+      return `<li><span class="sev ${d.severity}">${d.severity}</span> ${d.type} <span class="amt">${amt}</span></li>`;
+    }).join("");
+    const cmp = (fpci != null && spci != null)
+      ? `<div class="dp-cmp">Fastest avg PCI <b>${fpci}</b> · Smoothest <b>${spci}</b></div>` : "";
+    const avoided = rp.avoided_by_smoothest
+      ? `<div class="dp-avoid">✓ The Smoothest route avoids this segment</div>` : "";
+
+    const html = `<div class="distress-pop">
+        <div class="dp-head"><span class="badge fail">PCI ${rp.score} · ${rp.label}</span> ${rp.address}</div>
+        <img class="dp-img" src="${rp.image}" alt="Cyvl pavement distress survey" loading="lazy"
+             onclick="window.open('${rp.image}','_blank')" title="Open full survey photo" />
+        <div class="dp-cap">Cyvl pavement survey — distress highlighted · inspection ${rp.inspect_id}</div>
+        <ul class="dp-list">${distressRows}</ul>
+        ${avoided}${cmp}
+      </div>`;
+
+    // Bold red highlight on the rough stretch of road (under the pin).
+    if (rp.highlight && rp.highlight.length >= 2) {
+      const latlngs = rp.highlight.map(([lo, la]) => [la, lo]);
+      const halo = L.polyline(latlngs, { color: "#fde68a", weight: 14, opacity: 0.9 }).addTo(map);
+      const seg = L.polyline(latlngs, { color: "#dc2626", weight: 8, opacity: 0.95 })
+        .addTo(map).bindPopup(html, { maxWidth: 320 });
+      roughLayers.push(halo, seg);
+    }
+    const m = L.marker([rp.lat, rp.lon], { icon })
+      .addTo(map)
+      .bindPopup(html, { maxWidth: 320 });
+    roughLayers.push(m);
+  });
 }
 
 function routeStyle(color, isActive) {
@@ -420,6 +470,34 @@ function renderRouteSummaries(data) {
   });
 
   el.appendChild(container);
+
+  // Road distress on the Fastest route — real Cyvl survey photos, shown inline.
+  const rough = data.rough_points || [];
+  if (rough.length) {
+    const h = document.createElement("div");
+    h.className = "section-label";
+    h.style.marginTop = "10px";
+    h.textContent = `Road distress · Fastest route (${rough.length}) — Cyvl survey`;
+    el.appendChild(h);
+
+    rough.forEach(rp => {
+      const dl = (rp.distresses || []).slice(0, 3)
+        .map(d => `${d.type}${d.severity === "high" ? " (high)" : ""}`).join(", ");
+      const card = document.createElement("div");
+      card.className = "rough-card";
+      card.innerHTML = `
+        <img class="rough-thumb" src="${rp.image}" alt="Cyvl distress survey" loading="lazy"
+             onclick="event.stopPropagation();window.open('${rp.image}','_blank')" title="Open full survey photo">
+        <div class="rough-meta">
+          <span class="badge fail">PCI ${rp.score} · ${rp.label}</span>
+          <div class="rough-addr">${rp.address}</div>
+          <div class="rough-dl">${dl}</div>
+          ${rp.avoided_by_smoothest ? '<div class="rough-avoid">✓ Smoothest avoids this</div>' : ""}
+        </div>`;
+      card.addEventListener("click", () => map.setView([rp.lat, rp.lon], 18));
+      el.appendChild(card);
+    });
+  }
 
   // Sign warnings for the active profile
   const activeWarnings = (data.routes[activeProfile]?.sign_warnings || []);
@@ -541,6 +619,8 @@ function clearRoutes() {
   routeLayers = {};
   blockedLayers.forEach(l => map.removeLayer(l));
   blockedLayers = [];
+  roughLayers.forEach(l => map.removeLayer(l));
+  roughLayers = [];
   clearSignMarkers();
 }
 
@@ -570,7 +650,34 @@ $("d-wheelbase").addEventListener("change", deriveRadius);
 ["d-length", "d-width", "d-radius"].forEach(id => $(id).addEventListener("change", refreshSwept));
 
 // ── Init ──────────────────────────────────────────────────────────────────────
-$("profile-blurb").textContent = PROFILES[activeProfile].blurb;
-loadVehicles();
-loadNetwork();
-setMode("start");
+// Hardcoded default demo route so the distress highlights + photos show on load.
+const DEFAULT_ROUTE = { start: [42.3966, -71.1226], end: [42.3770, -71.0939] }; // Davis Sq -> Union Sq
+
+function placePin(kind, lat, lon) {
+  const ll = L.latLng(lat, lon);
+  if (kind === "start") {
+    startLatLng = ll;
+    if (startMarker) map.removeLayer(startMarker);
+    startMarker = L.marker(ll, { icon: pinIcon("#2563eb", "A") }).addTo(map).bindPopup("Start (A)");
+    $("start-coords").textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+  } else {
+    endLatLng = ll;
+    if (endMarker) map.removeLayer(endMarker);
+    endMarker = L.marker(ll, { icon: pinIcon("#059669", "B") }).addTo(map).bindPopup("End (B)");
+    $("end-coords").textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+  }
+  $("pin-summary").classList.remove("hidden");
+  $("route-btn").disabled = !(startLatLng && endLatLng);
+}
+
+(async function init() {
+  $("profile-blurb").textContent = PROFILES[activeProfile].blurb;
+  await loadVehicles();
+  await loadNetwork();
+  placePin("start", ...DEFAULT_ROUTE.start);
+  placePin("end", ...DEFAULT_ROUTE.end);
+  $("pin-hint").classList.add("hidden");
+  document.querySelectorAll(".pin-btn").forEach(b => b.classList.remove("active"));
+  clickMode = "start";   // still ready to drop a new A/B
+  await findRoute();
+})();

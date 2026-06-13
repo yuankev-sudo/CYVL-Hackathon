@@ -1,0 +1,54 @@
+{
+  "_note": "Real Cyvl pavement-distress detail (get_pavement_score_detail) for the worst corridor segments. Pre-fetched so the app can prove the PCI numbers with the surveyed distress + masked imagery without a live API key. image = inspection-cell mask photo with the distress highlighted.",
+  "_image_base": "https://dcygqrjfsypox.cloudfront.net/0e9ad4538ce0a1b7876a5bcfd6275a942b2f92472dfa4b85e93f424eb4a62eda/pavements_masks_001/",
+  "points": [
+    {
+      "inspect_id": "IA01989", "address": "Benton Road",
+      "lon": -71.105840, "lat": 42.388142,
+      "score": 10.5, "label": "Serious",
+      "distresses": [
+        {"type": "Alligator cracking", "severity": "high", "area_sqft": 50},
+        {"type": "Block cracking", "severity": "high", "area_sqft": 155},
+        {"type": "Patching", "severity": "medium", "area_sqft": 84},
+        {"type": "Weathering", "severity": "medium", "area_sqft": 468}
+      ],
+      "image": "https://dcygqrjfsypox.cloudfront.net/0e9ad4538ce0a1b7876a5bcfd6275a942b2f92472dfa4b85e93f424eb4a62eda/pavements_masks_001/GX050776_MP4_1763668476703018_front_3000.jpg"
+    },
+    {
+      "inspect_id": "IA02033", "address": "Benton Road",
+      "lon": -71.106535, "lat": 42.387130,
+      "score": 17.6, "label": "Serious",
+      "distresses": [
+        {"type": "Alligator cracking", "severity": "high", "area_sqft": 132},
+        {"type": "Block cracking", "severity": "high", "area_sqft": 191},
+        {"type": "Weathering", "severity": "medium", "area_sqft": 694},
+        {"type": "Patching", "severity": "medium", "area_sqft": 17}
+      ],
+      "image": "https://dcygqrjfsypox.cloudfront.net/0e9ad4538ce0a1b7876a5bcfd6275a942b2f92472dfa4b85e93f424eb4a62eda/pavements_masks_001/GX050776_MP4_1763668628200466_front_3000.jpg"
+    },
+    {
+      "inspect_id": "IA01957", "address": "Elm Street",
+      "lon": -71.114245, "lat": 42.386594,
+      "score": 27.8, "label": "Very Poor",
+      "distresses": [
+        {"type": "Weathering", "severity": "high", "area_sqft": 887},
+        {"type": "Block cracking", "severity": "high", "area_sqft": 65},
+        {"type": "Alligator cracking", "severity": "high", "area_sqft": 37},
+        {"type": "Patching", "severity": "medium", "area_sqft": 30}
+      ],
+      "image": "https://dcygqrjfsypox.cloudfront.net/0e9ad4538ce0a1b7876a5bcfd6275a942b2f92472dfa4b85e93f424eb4a62eda/pavements_masks_001/GX010766_MP4_1763480865795263_front_3000.jpg"
+    },
+    {
+      "inspect_id": "IA00239", "address": "Elm Street",
+      "lon": -71.114790, "lat": 42.387223,
+      "score": 30.6, "label": "Very Poor",
+      "distresses": [
+        {"type": "Pothole", "severity": "medium", "qty": 1},
+        {"type": "Alligator cracking", "severity": "high", "area_sqft": 22},
+        {"type": "Raveling", "severity": "medium", "area_sqft": 36},
+        {"type": "Patching", "severity": "medium", "area_sqft": 77}
+      ],
+      "image": "https://dcygqrjfsypox.cloudfront.net/0e9ad4538ce0a1b7876a5bcfd6275a942b2f92472dfa4b85e93f424eb4a62eda/pavements_masks_001/GX010766_MP4_1763480856795438_front_3000.jpg"
+    }
+  ]
+}
