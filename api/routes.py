@@ -250,6 +250,92 @@ def dynamic_route(req: DynamicRouteRequest):
     }
 
 
+# ── All-profiles route (single call returns fastest + smoothest + largevehicle) ──
+
+class AllRoutesRequest(BaseModel):
+    start_lat: float
+    start_lon: float
+    end_lat: float
+    end_lon: float
+    vehicle_id: str | None = None
+    vehicle: dict | None = None  # dimension overrides for the truck profile
+
+
+ROUTE_COLORS = {
+    "fastest":      "#f59e0b",   # amber
+    "smoothest":    "#38bdf8",   # sky blue
+    "largevehicle": "#4ade80",   # green
+}
+
+
+@router.post("/route/all")
+def all_routes(req: AllRoutesRequest):
+    """
+    Compute fastest, smoothest, and large-vehicle routes in one request.
+    Feasibility is evaluated once (on the naive path) and shared across profiles.
+    """
+    from routing.cyvl_graph import path_to_geojson
+
+    vehicle = _resolve_vehicle(req.vehicle_id, req.vehicle)
+    tg = turning_geometry(vehicle)
+    vehicle["turning_radius_ft"] = tg.turning_radius_ft
+
+    g = _get_cyvl_graph()
+    start_node = g.nearest_node(req.start_lon, req.start_lat, min_degree=2)
+    end_node   = g.nearest_node(req.end_lon,   req.end_lat,   min_degree=2)
+    if not start_node or not end_node:
+        raise HTTPException(400, "Could not snap start/end to road network")
+
+    naive_path = g.dijkstra(start_node, end_node)
+    if not naive_path:
+        raise HTTPException(400, "No path found between selected points")
+
+    # Run feasibility once on the naive path (used by largevehicle profile)
+    feasibility = g.check_route_feasibility(naive_path, vehicle, obstacles=_obstacles)
+    blocked_ids = {r["node_id"] for r in feasibility if r["verdict"] == "fail"}
+
+    routes = {}
+    for profile, defaults in PROFILE_DEFAULTS.items():
+        pci   = defaults["pci_penalty"]
+        blocks = blocked_ids if defaults["block_turns"] else set()
+        path  = g.dijkstra(start_node, end_node, blocked=blocks,
+                           pci_penalty_factor=pci) or naive_path
+        gj = path_to_geojson(g, path)
+        gj["properties"].update({"route_type": profile, "color": ROUTE_COLORS[profile]})
+
+        length_m  = _path_length_m(g, path)
+        naive_len = _path_length_m(g, naive_path)
+        avg_pci   = _route_avg_pci(g, path)
+        naive_pci = _route_avg_pci(g, naive_path)
+
+        routes[profile] = {
+            "geojson": gj,
+            "stats": {
+                "length_m":             length_m,
+                "extra_m":              (length_m or 0) - (naive_len or 0),
+                "avg_pci":              avg_pci,
+                "naive_avg_pci":        naive_pci,
+                "blocked_count":        len(blocks),
+                "intersections_checked": len(feasibility),
+            },
+        }
+
+    sn, en = g.nodes[start_node], g.nodes[end_node]
+    return {
+        "routes":      routes,
+        "feasibility": feasibility,
+        "start": {"node_id": start_node, "lat": sn.lat, "lon": sn.lon},
+        "end":   {"node_id": end_node,   "lat": en.lat, "lon": en.lon},
+        "vehicle": {
+            "id":                vehicle["id"],
+            "name":              vehicle.get("name"),
+            "turning_radius_ft": tg.turning_radius_ft,
+            "outer_radius_ft":   tg.outer_radius_ft,
+            "swept_width_ft":    tg.swept_width_ft,
+        },
+    }
+
+
 # ── Cyvl pass-throughs (optional overlays) ────────────────────────────────────
 
 def _require_cyvl():
