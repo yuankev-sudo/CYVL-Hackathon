@@ -1,4 +1,6 @@
-// ClearPath — profile-aware A-to-B routing on the real Somerville network.
+// ClearPath — show all three routing profiles at once.
+
+function _miles(m) { return m != null ? Math.round(m / 1609.344 * 100) / 100 : null; }
 
 const SOMERVILLE_CENTER = [42.387, -71.100];
 const SOMERVILLE_ZOOM   = 14;
@@ -9,20 +11,40 @@ L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
 }).addTo(map);
 
 // ── State ────────────────────────────────────────────────────────────────────
-let profile     = "fastest";
-let clickMode   = "start";
-let startLatLng = null, endLatLng = null;
-let startMarker = null, endMarker = null;
-let networkLayer = null, naiveLayer = null, safeLayer = null;
+let activeProfile = "fastest";
+let clickMode     = "start";
+let startLatLng   = null, endLatLng = null;
+let startMarker   = null, endMarker = null;
+let networkLayer  = null;
+let routeLayers   = {};        // { fastest: L.GeoJSON, smoothest: ..., largevehicle: ... }
 let blockedLayers = [];
-let VEHICLES = {};
+let signLayers    = [];
+let lastRouteData = null;
+let VEHICLES      = {};
 
 const $ = id => document.getElementById(id);
 
-const PROFILE_BLURB = {
-  fastest:      "Shortest distance on the real road network.",
-  smoothest:    "Avoids rough pavement (low PCI) — a gentler ride for ambulances.",
-  largevehicle: "Blocks turns the vehicle's swept path can't clear, then reroutes around them.",
+// ── Profile metadata ──────────────────────────────────────────────────────────
+const PROFILES = {
+  fastest: {
+    icon: "🚗", label: "Fastest", color: "#f59e0b",
+    blurb: "Shortest distance on the real road network.",
+    summary: (s) => `No pavement or turn restrictions.`,
+  },
+  smoothest: {
+    icon: "🚑", label: "Smoothest", color: "#38bdf8",
+    blurb: "Avoids rough pavement — gentler ride for ambulances.",
+    summary: (s) => s.avg_pci != null
+      ? `Avg pavement PCI ${s.avg_pci}${s.extra_m > 50 ? ` · +${Math.round(s.extra_m)}m vs fastest` : " · same path"}.`
+      : "Prefers well-maintained roads.",
+  },
+  largevehicle: {
+    icon: "🚛", label: "Large Vehicle", color: "#4ade80",
+    blurb: "Blocks turns the swept path can't clear, then reroutes.",
+    summary: (s, v) => s.blocked_count > 0
+      ? `Avoids ${s.blocked_count} turn${s.blocked_count !== 1 ? "s" : ""} too tight for ${v?.name ?? "this vehicle"}.`
+      : `All corners clear for ${v?.name ?? "this vehicle"}.`,
+  },
 };
 
 // ── Marker icons ─────────────────────────────────────────────────────────────
@@ -42,90 +64,101 @@ async function loadVehicles() {
   VEHICLES = await (await fetch("/api/vehicles")).json();
   const sel = $("vehicle-select");
   for (const [id, v] of Object.entries(VEHICLES)) sel.add(new Option(v.name, id));
-  sel.value = "WB-67";
-  fillDims(VEHICLES["WB-67"]);
+  sel.value = "FIRE-LADDER";
+  fillDims(VEHICLES["FIRE-LADDER"]);
 }
 
 function fillDims(v) {
-  $("d-length").value = v.length_ft ?? "";
-  $("d-width").value = v.width_ft ?? "";
+  $("d-length").value    = v.length_ft ?? "";
+  $("d-width").value     = v.width_ft ?? "";
+  $("d-height").value    = v.height_ft ?? "";
   $("d-wheelbase").value = v.wheelbase_ft ?? "";
-  $("d-radius").value = v.turning_radius_ft ?? "";
+  $("d-radius").value    = v.turning_radius_ft ?? "";
   refreshSwept();
 }
 
 function readDims() {
   return {
-    id: $("vehicle-select").value,
-    length_ft: parseFloat($("d-length").value) || null,
-    width_ft: parseFloat($("d-width").value) || null,
-    wheelbase_ft: parseFloat($("d-wheelbase").value) || null,
-    turning_radius_ft: parseFloat($("d-radius").value) || null,
+    id:                $("vehicle-select").value,
+    length_ft:         parseFloat($("d-length").value)    || null,
+    width_ft:          parseFloat($("d-width").value)     || null,
+    wheelbase_ft:      parseFloat($("d-wheelbase").value) || null,
+    turning_radius_ft: parseFloat($("d-radius").value)    || null,
   };
 }
 
-async function turningGeometry(dims) {
-  return (await fetch("/api/turning-radius", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(dims),
-  })).json();
+function readHeight() {
+  return parseFloat($("d-height").value) || null;
 }
 
-// Re-derive turning radius from wheelbase (user changed wheelbase)
+async function refreshSwept() {
+  try {
+    const g = await (await fetch("/api/turning-radius", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(readDims()),
+    })).json();
+    $("swept-hint").innerHTML =
+      `Outer swing <b>${g.outer_radius_ft} ft</b> · swept band <b>${g.swept_width_ft} ft</b> wide.`;
+  } catch (_) {}
+}
+
 async function deriveRadius() {
-  const dims = readDims();
-  dims.turning_radius_ft = null;          // force re-derivation
-  const g = await turningGeometry(dims);
-  $("d-radius").value = g.turning_radius_ft;
-  showSwept(g);
+  const dims = { ...readDims(), turning_radius_ft: null };
+  try {
+    const g = await (await fetch("/api/turning-radius", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(dims),
+    })).json();
+    $("d-radius").value = g.turning_radius_ft;
+    refreshSwept();
+  } catch (_) {}
 }
 
-async function refreshSwept() { showSwept(await turningGeometry(readDims())); }
-
-function showSwept(g) {
-  $("swept-hint").innerHTML =
-    `Outer swing radius <b>${g.outer_radius_ft} ft</b> · swept band <b>${g.swept_width_ft} ft</b> wide. ` +
-    `Checked against every corner's geometry along the route.`;
-}
-
-// ── Road network ──────────────────────────────────────────────────────────────
+// ── Road network (muted background — routes pop on top) ───────────────────────
 async function loadNetwork() {
   setLoading(true, "Loading road network…");
   try {
     const fc = await (await fetch("/api/network")).json();
     networkLayer = L.geoJSON(fc, {
       filter: f => f.geometry.type === "LineString",
-      style: f => ({ color: f.properties.color || "#888", weight: 2.5, opacity: 0.7 }),
+      // Uniform muted gray — PCI info available on hover but doesn't compete with routes
+      style: { color: "#64748b", weight: 1.5, opacity: 0.28 },
       onEachFeature: (f, layer) => {
         const p = f.properties;
         if (p.pci_score != null)
-          layer.bindTooltip(`PCI ${p.pci_score.toFixed(0)} — ${p.pci_label}<br>${p.length_m}m`, { sticky: true });
+          layer.bindTooltip(
+            `<b>${p.pci_label}</b> · PCI ${p.pci_score.toFixed(0)}<br>${p.length_m}m`,
+            { sticky: true }
+          );
       },
     }).addTo(map);
   } catch (e) { console.error("Network load failed:", e); }
   finally { setLoading(false); }
 }
 
-// ── Profile selection ──────────────────────────────────────────────────────────
-document.querySelectorAll(".profile").forEach(btn => btn.addEventListener("click", () => {
-  document.querySelectorAll(".profile").forEach(b => b.classList.remove("active"));
-  btn.classList.add("active");
-  profile = btn.dataset.profile;
-  $("profile-blurb").textContent = PROFILE_BLURB[profile];
-  $("truck-panel").classList.toggle("hidden", profile !== "largevehicle");
-  $("route-btn").textContent = profile === "largevehicle" ? "Check & Route" : "Get Directions";
-}));
+// ── Profile tab selection ──────────────────────────────────────────────────────
+document.querySelectorAll(".profile").forEach(btn =>
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".profile").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    const p = btn.dataset.profile;
+    $("profile-blurb").textContent = PROFILES[p].blurb;
+    $("truck-panel").classList.toggle("hidden", p !== "largevehicle");
+  })
+);
 
 // ── Pin placement ──────────────────────────────────────────────────────────────
 $("btn-set-start").addEventListener("click", () => setMode("start"));
-$("btn-set-end").addEventListener("click", () => setMode("end"));
+$("btn-set-end").addEventListener("click",   () => setMode("end"));
 
 function setMode(mode) {
   clickMode = mode;
   $("btn-set-start").classList.toggle("active", mode === "start");
-  $("btn-set-end").classList.toggle("active", mode === "end");
-  const hint = $("pin-hint");
-  hint.textContent = mode === "start" ? "Click the map to place Start (A)" : "Click the map to place End (B)";
-  hint.classList.remove("hidden");
+  $("btn-set-end").classList.toggle("active",   mode === "end");
+  $("pin-hint").textContent   = mode === "start"
+    ? "Click the map to place Start (A)"
+    : "Click the map to place End (B)";
+  $("pin-hint").classList.remove("hidden");
   map.getContainer().style.cursor = "crosshair";
 }
 
@@ -134,14 +167,16 @@ map.on("click", e => {
   if (clickMode === "start") {
     startLatLng = e.latlng;
     if (startMarker) map.removeLayer(startMarker);
-    startMarker = L.marker(e.latlng, { icon: pinIcon("#2563eb", "A") }).addTo(map).bindPopup("Start (A)");
+    startMarker = L.marker(e.latlng, { icon: pinIcon("#2563eb", "A") })
+      .addTo(map).bindPopup("Start (A)");
     $("start-coords").textContent = `${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}`;
     $("pin-summary").classList.remove("hidden");
     setMode("end");
   } else {
     endLatLng = e.latlng;
     if (endMarker) map.removeLayer(endMarker);
-    endMarker = L.marker(e.latlng, { icon: pinIcon("#059669", "B") }).addTo(map).bindPopup("End (B)");
+    endMarker = L.marker(e.latlng, { icon: pinIcon("#059669", "B") })
+      .addTo(map).bindPopup("End (B)");
     $("end-coords").textContent = `${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}`;
     clickMode = null;
     map.getContainer().style.cursor = "";
@@ -156,135 +191,253 @@ $("route-btn").addEventListener("click", findRoute);
 
 async function findRoute() {
   if (!startLatLng || !endLatLng) return;
-  setLoading(true, "Computing route…");
+  setLoading(true, "Computing 3 routes…");
   clearRoutes();
+
   try {
     const body = {
-      start_lat: startLatLng.lat, start_lon: startLatLng.lng,
-      end_lat: endLatLng.lat, end_lon: endLatLng.lng,
-      profile,
-      vehicle_id: profile === "largevehicle" ? $("vehicle-select").value : null,
-      vehicle: profile === "largevehicle" ? readDims() : null,
+      start_lat:  startLatLng.lat, start_lon: startLatLng.lng,
+      end_lat:    endLatLng.lat,   end_lon:   endLatLng.lng,
+      vehicle_id: $("vehicle-select").value,
+      vehicle:    readDims(),
+      height_ft:  readHeight(),
     };
-    const res = await fetch("/api/route/dynamic", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    const res = await fetch("/api/route/all", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
     });
-    if (!res.ok) { const err = await res.json(); alert("Routing error: " + (err.detail || res.statusText)); return; }
-    const data = await res.json();
-    renderRoutes(data);
-    renderResults(data);
-  } catch (e) { alert("Request failed: " + e.message); }
-  finally { setLoading(false); }
+    if (!res.ok) {
+      const err = await res.json();
+      alert("Routing error: " + (err.detail || res.statusText));
+      return;
+    }
+    lastRouteData = await res.json();
+    renderAllRoutes(lastRouteData);
+    renderRouteSummaries(lastRouteData);
+  } catch (e) {
+    alert("Request failed: " + e.message);
+  } finally {
+    setLoading(false);
+  }
 }
 
-function renderRoutes(data) {
-  const truck = data.profile === "largevehicle";
+// ── Draw all 3 routes ──────────────────────────────────────────────────────────
+function renderAllRoutes(data) {
+  Object.keys(PROFILES).forEach(profile => {
+    const r = data.routes[profile];
+    if (!r) return;
+    const color   = r.geojson.properties.color;
+    const isActive = profile === activeProfile;
+    const layer = L.geoJSON(r.geojson, {
+      style: routeStyle(color, isActive),
+    }).addTo(map);
+    layer.bindTooltip(PROFILES[profile].label, { sticky: true });
+    routeLayers[profile] = layer;
+  });
 
-  // Naive baseline — only show when the chosen route differs.
-  if (data.naive_route && data.rerouted) {
-    naiveLayer = L.geoJSON(data.naive_route, {
-      style: { color: "#ef4444", weight: 4, dashArray: "8 5", opacity: 0.85 },
-    }).addTo(map).bindTooltip(truck ? "Naive route — turns it can't clear" : "Fastest route", { sticky: true });
-  }
-  // Chosen route.
-  if (data.safe_route) {
-    const c = data.safe_route.properties.color || "#22c55e";
-    safeLayer = L.geoJSON(data.safe_route, { style: { color: c, weight: 5, opacity: 0.95 } })
-      .addTo(map).bindTooltip(data.rerouted ? "ClearPath route" : "Route", { sticky: true });
-  }
-  // Blocked / tight intersections (truck profile only).
-  if (truck) {
-    (data.blocked_intersections || []).filter(b => b.verdict !== "pass").forEach(b => {
-      const color = b.verdict === "fail" ? "#ef4444" : "#f59e0b";
-      const circle = L.circleMarker([b.lat, b.lon], { radius: 8, color, fillColor: color, fillOpacity: 0.9, weight: 2 })
-        .addTo(map).bindPopup(
-          `<b>${b.verdict.toUpperCase()}</b><br>${b.reason || ""}<div class="popup-photos">Loading site photos…</div>`,
-          { maxWidth: 260 });
-      // Fill in the photo(s) the first time the popup opens.
-      circle.on("popupopen", async ev => {
-        const host = ev.popup.getElement().querySelector(".popup-photos");
-        if (!host || host.dataset.loaded) return;
-        host.dataset.loaded = "1";
-        try {
-          const r = await fetch(`/api/intersection/imagery?lon=${b.lon}&lat=${b.lat}&verdict=${b.verdict}`);
-          const { images = [] } = r.ok ? await r.json() : {};
-          if (!images.length) { host.remove(); return; }
-          host.innerHTML = "";
-          const im = images[0];
-          const t = document.createElement("img");
-          t.src = thumbSrc(im, 480);
-          t.alt = im.caption || "Intersection photo";
-          t.title = im.viewer_url ? "Open interactive 3D view" : "Open full photo";
-          if (im.viewer_url) t.classList.add("is-3d");
-          t.addEventListener("click", () => openPhoto(im));
-          host.appendChild(t);
-          ev.popup.update();
-        } catch (_) { host.remove(); }
-      });
-      blockedLayers.push(circle);
+  // Blocked intersections (from large-vehicle feasibility — always shown)
+  (data.feasibility || []).filter(b => b.verdict !== "pass").forEach(b => {
+    const color = b.verdict === "fail" ? "#ef4444" : "#f59e0b";
+    const circle = L.circleMarker([b.lat, b.lon], {
+      radius: 7, color, fillColor: color, fillOpacity: 0.9, weight: 2,
+    }).addTo(map).bindPopup(
+      `<b>${b.verdict.toUpperCase()}</b><br>${b.reason || ""}<div class="popup-photos">Loading site photos…</div>`,
+      { maxWidth: 260 });
+    // Fill in the photo(s) the first time the popup opens.
+    circle.on("popupopen", async ev => {
+      const host = ev.popup.getElement().querySelector(".popup-photos");
+      if (!host || host.dataset.loaded) return;
+      host.dataset.loaded = "1";
+      try {
+        const r = await fetch(`/api/intersection/imagery?lon=${b.lon}&lat=${b.lat}&verdict=${b.verdict}`);
+        const { images = [] } = r.ok ? await r.json() : {};
+        if (!images.length) { host.remove(); return; }
+        host.innerHTML = "";
+        const im = images[0];
+        const t = document.createElement("img");
+        t.src = thumbSrc(im, 480);
+        t.alt = im.caption || "Intersection photo";
+        t.title = im.viewer_url ? "Open interactive 3D view" : "Open full photo";
+        if (im.viewer_url) t.classList.add("is-3d");
+        t.addEventListener("click", () => openPhoto(im));
+        host.appendChild(t);
+        ev.popup.update();
+      } catch (_) { host.remove(); }
     });
-  }
-  const target = safeLayer || naiveLayer;
+    blockedLayers.push(circle);
+  });
+
+  // Sign warnings — show for the active profile's route
+  renderSignMarkers(data.routes[activeProfile]?.sign_warnings || []);
+
+  // Fit to the active route
+  const target = routeLayers[activeProfile];
   if (target) { try { map.fitBounds(target.getBounds().pad(0.15)); } catch (_) {} }
 }
 
-function renderResults(data) {
-  const s = data.stats || {};
-  const truck = data.profile === "largevehicle";
-  const smooth = data.profile === "smoothest";
-  const km = m => m != null ? `${(m / 1000).toFixed(2)} km` : "—";
+function routeStyle(color, isActive) {
+  return {
+    color,
+    weight:    isActive ? 7 : 2.5,
+    opacity:   isActive ? 1.0 : 0.35,
+    dashArray: isActive ? null : "5 4",
+  };
+}
 
-  // Stats card
-  let rows = `<div class="stats-row"><span class="stats-label">Distance</span>
-      <span class="stats-val">${km(s.safe_length_m)}</span></div>`;
-  if (data.rerouted)
-    rows += `<div class="stats-row"><span class="stats-label">Fastest (naive)</span>
-        <span class="stats-val">${km(s.naive_length_m)}</span></div>`;
-  if (s.safe_avg_pci != null) {
-    const up = smooth && data.rerouted && s.safe_avg_pci > (s.naive_avg_pci ?? 0);
-    rows += `<div class="stats-row"><span class="stats-label">Avg pavement (PCI)</span>
-        <span class="stats-val ${up ? "up" : ""}">${s.safe_avg_pci}${up ? ` ▲ from ${s.naive_avg_pci}` : ""}</span></div>`;
+function selectProfile(profile) {
+  activeProfile = profile;
+  Object.entries(routeLayers).forEach(([p, layer]) => {
+    const color = PROFILES[p].color;
+    layer.setStyle(routeStyle(color, p === profile));
+    if (p === profile) layer.bringToFront();
+  });
+  document.querySelectorAll(".route-card").forEach(c => {
+    c.classList.toggle("active", c.dataset.profile === profile);
+  });
+  // Refresh sign markers for the newly selected route
+  if (lastRouteData) {
+    clearSignMarkers();
+    renderSignMarkers(lastRouteData.routes[profile]?.sign_warnings || []);
   }
-  if (truck) {
-    rows += `<div class="stats-row"><span class="stats-label">Turns checked</span>
-        <span class="stats-val">${s.intersections_checked ?? "—"}</span></div>
-      <div class="stats-row"><span class="stats-label">Blocked turns</span>
-        <span class="stats-val ${s.blocked_count ? "warn" : ""}">${s.blocked_count ?? "—"}</span></div>`;
-    if (data.vehicle)
-      rows += `<div class="stats-row"><span class="stats-label">${data.vehicle.name}</span>
-          <span class="stats-val">${data.vehicle.outer_radius_ft} ft swing</span></div>`;
-  }
-  $("stats-card").innerHTML = rows;
-  $("stats-card").classList.remove("hidden");
+}
 
-  // Result cards
+// ── Sign markers ──────────────────────────────────────────────────────────────
+const SIGN_COLORS = { fail: "#ef4444", tight: "#f59e0b", warn: "#f59e0b", info: "#60a5fa" };
+const SIGN_ICONS  = { fail: "⛔", tight: "⚠️", warn: "⚠️", info: "ℹ️" };
+
+function signIcon(verdict) {
+  const color = SIGN_COLORS[verdict] || "#94a3b8";
+  const icon  = SIGN_ICONS[verdict]  || "ℹ️";
+  return L.divIcon({
+    className: "",
+    html: `<div style="background:${color};width:26px;height:26px;border-radius:4px;
+      border:2px solid #fff;box-shadow:0 2px 5px rgba(0,0,0,.4);
+      display:flex;align-items:center;justify-content:center;font-size:14px">${icon}</div>`,
+    iconSize: [26, 26], iconAnchor: [13, 13],
+  });
+}
+
+function renderSignMarkers(warnings) {
+  (warnings || []).forEach(w => {
+    const imgLink = w.image_url
+      ? `<br><a href="${w.image_url}" target="_blank" style="color:#60a5fa;font-size:11px">View street photo</a>`
+      : "";
+    const marker = L.marker([w.lat, w.lon], { icon: signIcon(w.verdict) })
+      .addTo(map)
+      .bindPopup(
+        `<b>${w.label}</b> (${w.mutcd})<br>${w.message}${imgLink}`
+      );
+    signLayers.push(marker);
+  });
+}
+
+function clearSignMarkers() {
+  signLayers.forEach(l => map.removeLayer(l));
+  signLayers = [];
+}
+
+// ── Route summary cards ────────────────────────────────────────────────────────
+function renderRouteSummaries(data) {
   const el = $("results");
   el.innerHTML = "";
-  const status = data.rerouted ? (truck ? "fail" : "tight") : "pass";
-  const summary = document.createElement("div");
-  summary.className = `result-card ${status}`;
-  let msg;
-  if (truck && data.rerouted) msg = `Rerouted around ${s.blocked_count} turn${s.blocked_count !== 1 ? "s" : ""} the swept path can't clear`;
-  else if (truck) msg = "All turns clear for this vehicle";
-  else if (smooth && data.rerouted) msg = `Smoother route — avg PCI ${s.safe_avg_pci} vs ${s.naive_avg_pci}`;
-  else if (smooth) msg = "Fastest route is already the smoothest";
-  else msg = "Shortest path on the network";
-  summary.innerHTML = `<div class="name">${truck && data.vehicle ? data.vehicle.name : data.profile}</div>
-    <span class="badge ${status}">${data.rerouted ? "Rerouted" : "Clear"}</span>
-    <div class="reason">${msg}</div>`;
-  el.appendChild(summary);
 
-  if (truck) {
-    (data.blocked_intersections || []).filter(b => b.verdict !== "pass").forEach(b => {
+  const vehicle = data.vehicle;
+  const fastest_len = data.routes.fastest?.stats?.length_m;
+
+  const container = document.createElement("div");
+  container.className = "route-cards";
+
+  Object.entries(PROFILES).forEach(([profile, meta]) => {
+    const r = data.routes[profile];
+    if (!r) return;
+    const s = r.stats;
+
+    const miles   = s.distance_miles != null ? `${s.distance_miles} mi` : "—";
+    const mins    = s.time_min       != null ? `${s.time_min} min`      : "";
+    const extra   = s.extra_m > 80
+      ? `+${(_miles(s.extra_m)).toFixed(2)} mi detour` : null;
+    const pci     = s.avg_pci != null ? `PCI ${s.avg_pci}` : null;
+    const sumText = profile === "largevehicle"
+      ? meta.summary(s, vehicle)
+      : meta.summary(s);
+
+    const card = document.createElement("div");
+    card.className = `route-card${profile === activeProfile ? " active" : ""}`;
+    card.dataset.profile = profile;
+    card.style.setProperty("--accent", meta.color);
+
+    const pills = [pci, extra].filter(Boolean)
+      .map(t => `<span class="rc-pill">${t}</span>`).join("");
+
+    card.innerHTML = `
+      <div class="rc-top">
+        <span class="rc-icon">${meta.icon}</span>
+        <span class="rc-name">${meta.label}</span>
+        <span class="rc-dist" style="color:${meta.color}">${miles}</span>
+        ${mins ? `<span class="rc-time">${mins}</span>` : ""}
+      </div>
+      <div class="rc-pills">${pills}</div>
+      <div class="rc-summary">${sumText}</div>
+    `;
+    card.addEventListener("click", () => selectProfile(profile));
+    container.appendChild(card);
+  });
+
+  el.appendChild(container);
+
+  // Sign warnings for the active profile
+  const activeWarnings = (data.routes[activeProfile]?.sign_warnings || []);
+  if (activeWarnings.length) {
+    const wHeader = document.createElement("div");
+    wHeader.className = "section-label";
+    wHeader.style.marginTop = "8px";
+    wHeader.textContent = `Road signs along route (${activeWarnings.length})`;
+    el.appendChild(wHeader);
+
+    activeWarnings.forEach(w => {
+      const card = document.createElement("div");
+      const severity = w.verdict === "fail" ? "fail" : w.verdict === "tight" ? "tight" : "warn";
+      card.className = `result-card ${severity === "warn" ? "tight" : severity}`;
+      const imgHtml = w.image_url
+        ? `<a href="${w.image_url}" target="_blank" class="sign-photo-link">View street photo →</a>`
+        : "";
+      card.innerHTML = `
+        <div class="name">
+          <span class="badge ${severity === "warn" ? "tight" : severity}">${w.mutcd}</span>
+          ${w.label} · ${w.distance_m}m away
+        </div>
+        <div class="reason">${w.message}</div>
+        ${imgHtml}
+      `;
+      card.addEventListener("click", () => map.setView([w.lat, w.lon], 17));
+      el.appendChild(card);
+    });
+  }
+
+  // Blocked turns detail (largevehicle only)
+  const fails = (data.feasibility || []).filter(b => b.verdict !== "pass");
+  if (fails.length) {
+    const header = document.createElement("div");
+    header.className = "section-label";
+    header.style.marginTop = "8px";
+    header.textContent = `Blocked turns (${fails.length})`;
+    el.appendChild(header);
+
+    fails.forEach(b => {
       const card = document.createElement("div");
       card.className = `result-card ${b.verdict}`;
-      card.innerHTML = `<div class="name">Intersection ${b.node_id.slice(0, 8)}</div>
-        <span class="badge ${b.verdict}">${b.verdict}</span>
+      card.innerHTML = `
+        <div class="name"><span class="badge ${b.verdict}">${b.verdict}</span> ${b.lat.toFixed(4)}, ${b.lon.toFixed(4)}</div>
         <div class="reason">${b.reason || ""}</div>
         <div class="reason coords">${b.lat.toFixed(5)}, ${b.lon.toFixed(5)}</div>
         <div class="photos" aria-live="polite"></div>`;
-      // Center the map when the card body is clicked (but not when a photo is).
-      card.addEventListener("click", e => { if (!e.target.closest(".photos")) map.setView([b.lat, b.lon], 17); });
+      // Center the map + switch to the large-vehicle profile when the card body
+      // is clicked (but ignore clicks on a photo thumbnail).
+      card.addEventListener("click", e => {
+        if (e.target.closest(".photos")) return;
+        map.setView([b.lat, b.lon], 17);
+        selectProfile("largevehicle");
+      });
       el.appendChild(card);
       loadCardImagery(card.querySelector(".photos"), b);
     });
@@ -347,22 +500,23 @@ function openLightbox(url, caption) {
 $("clear-btn").addEventListener("click", clearAll);
 
 function clearRoutes() {
-  [naiveLayer, safeLayer].forEach(l => l && map.removeLayer(l));
-  naiveLayer = safeLayer = null;
+  Object.values(routeLayers).forEach(l => map.removeLayer(l));
+  routeLayers = {};
   blockedLayers.forEach(l => map.removeLayer(l));
   blockedLayers = [];
+  clearSignMarkers();
 }
 
 function clearAll() {
   clearRoutes();
   [startMarker, endMarker].forEach(m => m && map.removeLayer(m));
-  startMarker = endMarker = null;
-  startLatLng = endLatLng = null;
+  startMarker = endMarker = startLatLng = endLatLng = null;
   $("results").innerHTML = "";
   $("stats-card").classList.add("hidden");
   $("pin-summary").classList.add("hidden");
   $("start-coords").textContent = $("end-coords").textContent = "—";
   $("route-btn").disabled = true;
+  lastRouteData = null;
   setMode("start");
 }
 
@@ -373,12 +527,13 @@ function setLoading(on, text) {
   else el.classList.add("hidden");
 }
 
-// ── Form events + init ─────────────────────────────────────────────────────────
+// ── Form events ───────────────────────────────────────────────────────────────
 $("vehicle-select").addEventListener("change", e => fillDims(VEHICLES[e.target.value]));
 $("d-wheelbase").addEventListener("change", deriveRadius);
 ["d-length", "d-width", "d-radius"].forEach(id => $(id).addEventListener("change", refreshSwept));
 
-$("profile-blurb").textContent = PROFILE_BLURB[profile];
+// ── Init ──────────────────────────────────────────────────────────────────────
+$("profile-blurb").textContent = PROFILES[activeProfile].blurb;
 loadVehicles();
 loadNetwork();
 setMode("start");
