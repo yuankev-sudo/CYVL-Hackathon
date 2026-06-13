@@ -1,5 +1,7 @@
 // ClearPath — show all three routing profiles at once.
 
+function _miles(m) { return m != null ? Math.round(m / 1609.344 * 100) / 100 : null; }
+
 const SOMERVILLE_CENTER = [42.387, -71.100];
 const SOMERVILLE_ZOOM   = 14;
 
@@ -16,6 +18,7 @@ let startMarker   = null, endMarker = null;
 let networkLayer  = null;
 let routeLayers   = {};        // { fastest: L.GeoJSON, smoothest: ..., largevehicle: ... }
 let blockedLayers = [];
+let signLayers    = [];
 let lastRouteData = null;
 let VEHICLES      = {};
 
@@ -68,6 +71,7 @@ async function loadVehicles() {
 function fillDims(v) {
   $("d-length").value    = v.length_ft ?? "";
   $("d-width").value     = v.width_ft ?? "";
+  $("d-height").value    = v.height_ft ?? "";
   $("d-wheelbase").value = v.wheelbase_ft ?? "";
   $("d-radius").value    = v.turning_radius_ft ?? "";
   refreshSwept();
@@ -81,6 +85,10 @@ function readDims() {
     wheelbase_ft:      parseFloat($("d-wheelbase").value) || null,
     turning_radius_ft: parseFloat($("d-radius").value)    || null,
   };
+}
+
+function readHeight() {
+  return parseFloat($("d-height").value) || null;
 }
 
 async function refreshSwept() {
@@ -192,6 +200,7 @@ async function findRoute() {
       end_lat:    endLatLng.lat,   end_lon:   endLatLng.lng,
       vehicle_id: $("vehicle-select").value,
       vehicle:    readDims(),
+      height_ft:  readHeight(),
     };
     const res = await fetch("/api/route/all", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -235,6 +244,9 @@ function renderAllRoutes(data) {
     blockedLayers.push(circle);
   });
 
+  // Sign warnings — show for the active profile's route
+  renderSignMarkers(data.routes[activeProfile]?.sign_warnings || []);
+
   // Fit to the active route
   const target = routeLayers[activeProfile];
   if (target) { try { map.fitBounds(target.getBounds().pad(0.15)); } catch (_) {} }
@@ -259,6 +271,46 @@ function selectProfile(profile) {
   document.querySelectorAll(".route-card").forEach(c => {
     c.classList.toggle("active", c.dataset.profile === profile);
   });
+  // Refresh sign markers for the newly selected route
+  if (lastRouteData) {
+    clearSignMarkers();
+    renderSignMarkers(lastRouteData.routes[profile]?.sign_warnings || []);
+  }
+}
+
+// ── Sign markers ──────────────────────────────────────────────────────────────
+const SIGN_COLORS = { fail: "#ef4444", tight: "#f59e0b", warn: "#f59e0b", info: "#60a5fa" };
+const SIGN_ICONS  = { fail: "⛔", tight: "⚠️", warn: "⚠️", info: "ℹ️" };
+
+function signIcon(verdict) {
+  const color = SIGN_COLORS[verdict] || "#94a3b8";
+  const icon  = SIGN_ICONS[verdict]  || "ℹ️";
+  return L.divIcon({
+    className: "",
+    html: `<div style="background:${color};width:26px;height:26px;border-radius:4px;
+      border:2px solid #fff;box-shadow:0 2px 5px rgba(0,0,0,.4);
+      display:flex;align-items:center;justify-content:center;font-size:14px">${icon}</div>`,
+    iconSize: [26, 26], iconAnchor: [13, 13],
+  });
+}
+
+function renderSignMarkers(warnings) {
+  (warnings || []).forEach(w => {
+    const imgLink = w.image_url
+      ? `<br><a href="${w.image_url}" target="_blank" style="color:#60a5fa;font-size:11px">View street photo</a>`
+      : "";
+    const marker = L.marker([w.lat, w.lon], { icon: signIcon(w.verdict) })
+      .addTo(map)
+      .bindPopup(
+        `<b>${w.label}</b> (${w.mutcd})<br>${w.message}${imgLink}`
+      );
+    signLayers.push(marker);
+  });
+}
+
+function clearSignMarkers() {
+  signLayers.forEach(l => map.removeLayer(l));
+  signLayers = [];
 }
 
 // ── Route summary cards ────────────────────────────────────────────────────────
@@ -277,9 +329,11 @@ function renderRouteSummaries(data) {
     if (!r) return;
     const s = r.stats;
 
-    const km     = s.length_m != null ? `${(s.length_m / 1000).toFixed(2)} km` : "—";
-    const extra  = s.extra_m > 50 ? `+${(s.extra_m / 1000).toFixed(2)} km` : null;
-    const pci    = s.avg_pci  != null ? `PCI ${s.avg_pci}` : null;
+    const miles   = s.distance_miles != null ? `${s.distance_miles} mi` : "—";
+    const mins    = s.time_min       != null ? `${s.time_min} min`      : "";
+    const extra   = s.extra_m > 80
+      ? `+${(_miles(s.extra_m)).toFixed(2)} mi detour` : null;
+    const pci     = s.avg_pci != null ? `PCI ${s.avg_pci}` : null;
     const sumText = profile === "largevehicle"
       ? meta.summary(s, vehicle)
       : meta.summary(s);
@@ -296,7 +350,8 @@ function renderRouteSummaries(data) {
       <div class="rc-top">
         <span class="rc-icon">${meta.icon}</span>
         <span class="rc-name">${meta.label}</span>
-        <span class="rc-dist" style="color:${meta.color}">${km}</span>
+        <span class="rc-dist" style="color:${meta.color}">${miles}</span>
+        ${mins ? `<span class="rc-time">${mins}</span>` : ""}
       </div>
       <div class="rc-pills">${pills}</div>
       <div class="rc-summary">${sumText}</div>
@@ -307,7 +362,36 @@ function renderRouteSummaries(data) {
 
   el.appendChild(container);
 
-  // Blocked turns detail (largevehicle only, collapsible)
+  // Sign warnings for the active profile
+  const activeWarnings = (data.routes[activeProfile]?.sign_warnings || []);
+  if (activeWarnings.length) {
+    const wHeader = document.createElement("div");
+    wHeader.className = "section-label";
+    wHeader.style.marginTop = "8px";
+    wHeader.textContent = `Road signs along route (${activeWarnings.length})`;
+    el.appendChild(wHeader);
+
+    activeWarnings.forEach(w => {
+      const card = document.createElement("div");
+      const severity = w.verdict === "fail" ? "fail" : w.verdict === "tight" ? "tight" : "warn";
+      card.className = `result-card ${severity === "warn" ? "tight" : severity}`;
+      const imgHtml = w.image_url
+        ? `<a href="${w.image_url}" target="_blank" class="sign-photo-link">View street photo →</a>`
+        : "";
+      card.innerHTML = `
+        <div class="name">
+          <span class="badge ${severity === "warn" ? "tight" : severity}">${w.mutcd}</span>
+          ${w.label} · ${w.distance_m}m away
+        </div>
+        <div class="reason">${w.message}</div>
+        ${imgHtml}
+      `;
+      card.addEventListener("click", () => map.setView([w.lat, w.lon], 17));
+      el.appendChild(card);
+    });
+  }
+
+  // Blocked turns detail (largevehicle only)
   const fails = (data.feasibility || []).filter(b => b.verdict !== "pass");
   if (fails.length) {
     const header = document.createElement("div");
@@ -320,10 +404,8 @@ function renderRouteSummaries(data) {
       const card = document.createElement("div");
       card.className = `result-card ${b.verdict}`;
       card.innerHTML = `
-        <div class="name">Node ${b.node_id.slice(0, 8)}</div>
-        <span class="badge ${b.verdict}">${b.verdict}</span>
+        <div class="name"><span class="badge ${b.verdict}">${b.verdict}</span> ${b.lat.toFixed(4)}, ${b.lon.toFixed(4)}</div>
         <div class="reason">${b.reason || ""}</div>
-        <div class="reason coords">${b.lat.toFixed(5)}, ${b.lon.toFixed(5)}</div>
       `;
       card.addEventListener("click", () => {
         map.setView([b.lat, b.lon], 17);
@@ -342,6 +424,7 @@ function clearRoutes() {
   routeLayers = {};
   blockedLayers.forEach(l => map.removeLayer(l));
   blockedLayers = [];
+  clearSignMarkers();
 }
 
 function clearAll() {

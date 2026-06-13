@@ -325,6 +325,35 @@ def _road_width_m(edge: "Edge") -> float:
     return LANE_WIDTH_M if edge.oneway else LANE_WIDTH_M * 2
 
 
+def _turn_direction(
+    entry_pts: list[tuple[float, float]],
+    exit_pts: list[tuple[float, float]],
+    node_lon: float,
+    node_lat: float,
+) -> str:
+    """Return 'right', 'left', or 'straight' using cross product of oriented vectors."""
+    entry = list(entry_pts)
+    if (math.hypot(entry[-1][0]-node_lon, entry[-1][1]-node_lat) >
+            math.hypot(entry[0][0]-node_lon,  entry[0][1]-node_lat)):
+        entry = entry[::-1]
+    exit_ = list(exit_pts)
+    if (math.hypot(exit_[0][0]-node_lon, exit_[0][1]-node_lat) >
+            math.hypot(exit_[-1][0]-node_lon, exit_[-1][1]-node_lat)):
+        exit_ = exit_[::-1]
+    if len(entry) < 2 or len(exit_) < 2:
+        return "straight"
+    ev = (entry[-1][0]-entry[-2][0], entry[-1][1]-entry[-2][1])
+    xv = (exit_[1][0]-exit_[0][0],   exit_[1][1]-exit_[0][1])
+    cross = ev[0]*xv[1] - ev[1]*xv[0]
+    if abs(cross) < 1e-10:
+        return "straight"
+    return "left" if cross > 0 else "right"
+
+
+def _road_desc(edge: "Edge") -> str:
+    return "one-way street" if edge.oneway else "two-lane road"
+
+
 def _check_turn(
     entry_edge: "Edge",
     exit_edge: "Edge",
@@ -332,61 +361,99 @@ def _check_turn(
     node_lat: float,
     vehicle: dict,
     nearest_obstacle_m: float | None = None,
-) -> tuple[str, str | None]:
+) -> tuple[str, str]:
     """
-    Return (verdict, reason) for a vehicle making this turn.
-
-    Road width is derived from edge oneway flag (1 lane for one-way streets,
-    2 lanes for two-way), so narrow residential one-ways correctly produce fails.
-    Obstacle clearance from LiDAR trees/poles further constrains available space.
+    Return (verdict, description) for a vehicle making this turn.
+    Description is always populated — explains geometry for passes too.
     """
-    from geometry.turning import turning_geometry
-
     FT_TO_M = 0.3048
 
     deviation = _turn_deviation_deg(entry_edge.points, exit_edge.points, node_lon, node_lat)
+    direction = _turn_direction(entry_edge.points, exit_edge.points, node_lon, node_lat)
+
+    # Label the turn character
+    if deviation < 20:
+        turn_label = "straight through"
+    elif deviation < 50:
+        turn_label = f"gentle {direction} curve ({deviation:.0f}°)"
+    elif deviation < 80:
+        turn_label = f"moderate {direction} turn ({deviation:.0f}°)"
+    elif deviation < 100:
+        turn_label = f"right-angle {direction} turn ({deviation:.0f}°)"
+    elif deviation < 130:
+        turn_label = f"sharp {direction} turn ({deviation:.0f}°)"
+    else:
+        turn_label = f"very sharp {direction} turn ({deviation:.0f}°)"
+
+    # Road description
+    road_desc = f"from {_road_desc(entry_edge)} onto {_road_desc(exit_edge)}"
 
     if deviation < 20.0:
-        return "pass", None  # straight through or very gentle curve
+        return "pass", f"Straight through — no turning constraint. {road_desc.capitalize()}."
 
     if deviation > 165.0:
-        return "fail", f"Near-U-turn ({deviation:.0f}deg) — not feasible for large vehicles"
+        return "fail", (
+            f"Near-U-turn ({deviation:.0f}°) — physically impossible for large vehicles. "
+            f"This is a near-reversal of direction, not a normal intersection turn."
+        )
 
     r_needed_ft = vehicle["turning_radius_ft"]
     r_needed_m  = r_needed_ft * FT_TO_M
 
-    # Total usable width = approach width + departure width
     entry_w = _road_width_m(entry_edge)
     exit_w  = _road_width_m(exit_edge)
     full_width_m = entry_w + exit_w
+    full_width_ft = full_width_m / FT_TO_M
 
     sin_d = math.sin(math.radians(deviation))
-
     if deviation <= 90.0:
         available_r_m = full_width_m / (sin_d + 1e-9)
     else:
         factor = (165.0 - deviation) / 75.0
         available_r_m = full_width_m * factor / (sin_d + 1e-9)
 
-    if nearest_obstacle_m is not None:
-        available_r_m = min(available_r_m, nearest_obstacle_m)
-
+    obstacle_reduced = False
+    if nearest_obstacle_m is not None and nearest_obstacle_m < available_r_m:
+        available_r_m = nearest_obstacle_m
+        obstacle_reduced = True
 
     available_r_ft = available_r_m / FT_TO_M
+    margin_ft = available_r_ft - r_needed_ft
+
+    # Build obstacle note
+    if obstacle_reduced:
+        obs_note = f" A tree or utility pole {nearest_obstacle_m/FT_TO_M:.0f}ft from the corner limits usable space."
+    else:
+        obs_note = ""
+
+    # Build road-width note
+    entry_lbl = "one-way (narrow)" if entry_edge.oneway else "two-lane"
+    exit_lbl  = "one-way (narrow)" if exit_edge.oneway else "two-lane"
+    width_note = f"Approach is {entry_lbl} ({entry_w/FT_TO_M:.0f}ft), departure is {exit_lbl} ({exit_w/FT_TO_M:.0f}ft) — {full_width_ft:.0f}ft total usable width."
 
     if r_needed_m <= available_r_m:
-        return "pass", None
+        if margin_ft > 15:
+            comfort = f"Comfortable — {margin_ft:.0f}ft to spare."
+        elif margin_ft > 5:
+            comfort = f"Fits with {margin_ft:.0f}ft margin."
+        else:
+            comfort = f"Barely fits — only {margin_ft:.0f}ft margin."
+        return "pass", (
+            f"{turn_label.capitalize()}, {road_desc}. "
+            f"Needs {r_needed_ft:.0f}ft turning radius, {available_r_ft:.0f}ft available. "
+            f"{comfort}{obs_note} {width_note}"
+        )
     elif r_needed_m <= available_r_m * 1.15:
-        obstacle_note = f" (tree/pole at {nearest_obstacle_m/FT_TO_M:.0f}ft)" if nearest_obstacle_m else ""
         return "tight", (
-            f"{deviation:.0f}deg turn: needs {r_needed_ft:.0f}ft, "
-            f"{available_r_ft:.0f}ft available{obstacle_note}"
+            f"{turn_label.capitalize()}, {road_desc}. "
+            f"Needs {r_needed_ft:.0f}ft but only {available_r_ft:.0f}ft available — {abs(margin_ft):.0f}ft short. "
+            f"Tight but potentially navigable with careful positioning.{obs_note} {width_note}"
         )
     else:
-        obstacle_note = f" (obstacle at {nearest_obstacle_m/FT_TO_M:.0f}ft)" if nearest_obstacle_m else ""
         return "fail", (
-            f"{deviation:.0f}deg turn: needs {r_needed_ft:.0f}ft, "
-            f"only {available_r_ft:.0f}ft available{obstacle_note}"
+            f"{turn_label.capitalize()}, {road_desc}. "
+            f"Needs {r_needed_ft:.0f}ft turning radius but only {available_r_ft:.0f}ft available — {abs(margin_ft):.0f}ft short. "
+            f"Cannot complete in one pass.{obs_note} {width_note}"
         )
 
 
