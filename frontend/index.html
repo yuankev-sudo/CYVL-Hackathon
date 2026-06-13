@@ -11,12 +11,35 @@
   <div id="sidebar">
     <div class="brand">
       <h1>ClearPath</h1>
-      <p class="subtitle">LiDAR-powered routing for large vehicles</p>
+      <p class="subtitle">Routing off measured pavement reality</p>
     </div>
 
-    <div class="section-label">Vehicle</div>
-    <select id="vehicle-select"></select>
+    <!-- Routing profile, Google-Maps mode-tabs style -->
+    <div class="section-label">Routing profile</div>
+    <div id="profiles">
+      <button class="profile active" data-profile="fastest" title="Shortest travel time">
+        <span class="ico">🚗</span><span>Fastest</span></button>
+      <button class="profile" data-profile="smoothest" title="Smoothest pavement — for ambulances">
+        <span class="ico">🚑</span><span>Smoothest</span></button>
+      <button class="profile" data-profile="largevehicle" title="Fits a large vehicle's turns">
+        <span class="ico">🚛</span><span>Large&nbsp;Vehicle</span></button>
+    </div>
+    <p id="profile-blurb" class="hint">Shortest distance on the real road network.</p>
 
+    <!-- Truck dimensions (large-vehicle profile only) -->
+    <div id="truck-panel" class="hidden">
+      <div class="section-label">Vehicle preset</div>
+      <select id="vehicle-select"></select>
+      <div class="dims">
+        <div><label for="d-length">Length (ft)</label><input id="d-length" type="number" step="0.5"></div>
+        <div><label for="d-width">Width (ft)</label><input id="d-width" type="number" step="0.1"></div>
+        <div><label for="d-wheelbase">Wheelbase (ft)</label><input id="d-wheelbase" type="number" step="0.5"></div>
+        <div><label for="d-radius">Turn radius (ft)</label><input id="d-radius" type="number" step="0.5"></div>
+      </div>
+      <p id="swept-hint" class="hint"></p>
+    </div>
+
+    <!-- Trip endpoints -->
     <div class="section-label">Route</div>
     <div class="pin-controls">
       <button id="btn-set-start" class="pin-btn active" data-mode="start">
@@ -39,27 +62,10 @@
       </div>
     </div>
 
-    <button id="route-btn" disabled>Find Safe Route</button>
+    <button id="route-btn" disabled>Get Directions</button>
     <button id="clear-btn" class="secondary">Clear</button>
 
-    <div id="stats-card" class="stats-card hidden">
-      <div class="stats-row">
-        <span class="stats-label">Naive distance</span>
-        <span id="stat-naive-dist" class="stats-val">—</span>
-      </div>
-      <div class="stats-row">
-        <span class="stats-label">Safe distance</span>
-        <span id="stat-safe-dist" class="stats-val">—</span>
-      </div>
-      <div class="stats-row">
-        <span class="stats-label">Intersections checked</span>
-        <span id="stat-isect" class="stats-val">—</span>
-      </div>
-      <div class="stats-row">
-        <span class="stats-label">Blocked turns</span>
-        <span id="stat-blocked" class="stats-val">—</span>
-      </div>
-    </div>
+    <div id="stats-card" class="stats-card hidden"></div>
 
     <div id="results"></div>
 

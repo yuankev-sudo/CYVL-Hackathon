@@ -340,6 +340,8 @@ def _check_turn(
     2 lanes for two-way), so narrow residential one-ways correctly produce fails.
     Obstacle clearance from LiDAR trees/poles further constrains available space.
     """
+    from geometry.turning import turning_geometry
+
     FT_TO_M = 0.3048
 
     deviation = _turn_deviation_deg(entry_edge.points, exit_edge.points, node_lon, node_lat)
@@ -354,7 +356,6 @@ def _check_turn(
     r_needed_m  = r_needed_ft * FT_TO_M
 
     # Total usable width = approach width + departure width
-    # (truck can use its own lane + adjacent crossing lane)
     entry_w = _road_width_m(entry_edge)
     exit_w  = _road_width_m(exit_edge)
     full_width_m = entry_w + exit_w
@@ -364,14 +365,12 @@ def _check_turn(
     if deviation <= 90.0:
         available_r_m = full_width_m / (sin_d + 1e-9)
     else:
-        # Sharper than 90°: progressively less room; linearly reduce to ~0 at 165°
         factor = (165.0 - deviation) / 75.0
         available_r_m = full_width_m * factor / (sin_d + 1e-9)
 
-    # If a tree or pole sits within the swept arc, subtract its encroachment
     if nearest_obstacle_m is not None:
-        # Obstacle effectively reduces the clearance the truck has
         available_r_m = min(available_r_m, nearest_obstacle_m)
+
 
     available_r_ft = available_r_m / FT_TO_M
 
