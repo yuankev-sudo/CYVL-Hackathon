@@ -9,7 +9,8 @@
     "turning_radius_ft": 45.0,
     "overhang_front_ft": 4.0,
     "overhang_rear_ft": 2.5,
-    "track_width_ft": 8.0
+    "track_width_ft": 8.0,
+    "height_ft": 13.5
   },
   "SU-30": {
     "name": "SU-30 Single-Unit Truck",
@@ -21,7 +22,8 @@
     "turning_radius_ft": 28.0,
     "overhang_front_ft": 4.0,
     "overhang_rear_ft": 6.0,
-    "track_width_ft": 7.5
+    "track_width_ft": 7.5,
+    "height_ft": 11.0
   },
   "FIRE-LADDER": {
     "name": "Fire Ladder Apparatus",
@@ -33,7 +35,8 @@
     "turning_radius_ft": 38.0,
     "overhang_front_ft": 5.0,
     "overhang_rear_ft": 8.5,
-    "track_width_ft": 8.0
+    "track_width_ft": 8.0,
+    "height_ft": 11.5
   },
   "BUS-40": {
     "name": "40ft Transit Bus",
@@ -45,6 +48,7 @@
     "turning_radius_ft": 34.0,
     "overhang_front_ft": 7.5,
     "overhang_rear_ft": 7.5,
-    "track_width_ft": 7.75
+    "track_width_ft": 7.75,
+    "height_ft": 10.5
   }
 }

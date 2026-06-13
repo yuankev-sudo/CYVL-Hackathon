@@ -295,11 +295,13 @@ def all_routes(req: AllRoutesRequest):
     blocked_ids = {r["node_id"] for r in feasibility if r["verdict"] == "fail"}
 
     routes = {}
+    paths = {}
     for profile, defaults in PROFILE_DEFAULTS.items():
         pci   = defaults["pci_penalty"]
         blocks = blocked_ids if defaults["block_turns"] else set()
         path  = g.dijkstra(start_node, end_node, blocked=blocks,
                            pci_penalty_factor=pci) or naive_path
+        paths[profile] = path
         gj = path_to_geojson(g, path)
         gj["properties"].update({"route_type": profile, "color": ROUTE_COLORS[profile]})
 
@@ -320,10 +322,20 @@ def all_routes(req: AllRoutesRequest):
             },
         }
 
+    # Conflict corners ON the route the truck actually drives (the large-vehicle
+    # path) — these are the tight turns a driver must operate carefully and can
+    # simulate. The fail corners it routed around are reported separately.
+    lv_path = paths["largevehicle"]
+    route_feasibility = g.check_route_feasibility(lv_path, vehicle, obstacles=_obstacles)
+    lv_node_set = set(lv_path)
+    avoided = [r for r in feasibility if r["verdict"] == "fail" and r["node_id"] not in lv_node_set]
+
     sn, en = g.nodes[start_node], g.nodes[end_node]
     return {
         "routes":      routes,
-        "feasibility": feasibility,
+        "feasibility": route_feasibility,   # corners on the large-vehicle route
+        "avoided":     avoided,             # fail corners the reroute avoided
+        "lv_nodes":    lv_path,             # node sequence of the large-vehicle route
         "start": {"node_id": start_node, "lat": sn.lat, "lon": sn.lon},
         "end":   {"node_id": end_node,   "lat": en.lat, "lon": en.lon},
         "vehicle": {
@@ -334,6 +346,98 @@ def all_routes(req: AllRoutesRequest):
             "swept_width_ft":    tg.swept_width_ft,
         },
     }
+
+
+# ── Per-corner 3D maneuver scene (lazy — only for clicked conflict corners) ───
+
+class CornerRequest(BaseModel):
+    node_id: str
+    prev_id: str | None = None     # route node entering this corner (approach arm)
+    next_id: str | None = None     # route node leaving this corner (exit arm)
+    vehicle_id: str | None = None
+    vehicle: dict | None = None
+
+
+def _node_arms(g, node_id: str):
+    """
+    Return [(neighbor_id, (lon,lat) direction-point)] for every distinct road
+    touching the node — scanning edge_meta directly so ONE-WAY approach arms
+    (whose edge is only stored in the incoming direction) are included too.
+    """
+    arms, seen = [], set()
+    nx_, ny_ = g.nodes[node_id].lon, g.nodes[node_id].lat
+    for (a, b), e in g.edge_meta.items():
+        if a == node_id:
+            nb = b
+        elif b == node_id:
+            nb = a
+        else:
+            continue
+        if nb in seen:
+            continue
+        seen.add(nb)
+        dirpt = None
+        if e and e.points and len(e.points) >= 2:
+            pts = e.points
+            head_near = abs(pts[0][0] - nx_) + abs(pts[0][1] - ny_)
+            tail_near = abs(pts[-1][0] - nx_) + abs(pts[-1][1] - ny_)
+            dirpt = pts[1] if head_near <= tail_near else pts[-2]
+        else:
+            dirpt = (g.nodes[nb].lon, g.nodes[nb].lat)
+        arms.append((nb, (dirpt[0], dirpt[1])))
+    return arms
+
+
+@router.post("/corner")
+def corner_scene(req: CornerRequest):
+    """
+    Build the 3D maneuver scene for ONE intersection node: reconstructed road
+    geometry, the vehicle's swept path, conflict zones, dense truck poses, driver
+    instructions, and the nearest Cyvl 360° panorama. Generated on demand so we
+    only pay for corners the user actually inspects.
+    """
+    from geometry.corner import build_corner
+    from data.imagery import nearest_panorama
+
+    g = _get_cyvl_graph()
+    if req.node_id not in g.nodes:
+        raise HTTPException(404, f"Unknown node: {req.node_id}")
+
+    vehicle = _resolve_vehicle(req.vehicle_id, req.vehicle)
+    vehicle["turning_radius_ft"] = turning_geometry(vehicle).turning_radius_ft
+
+    arms = _node_arms(g, req.node_id)
+    if len(arms) < 2:
+        raise HTTPException(400, "Node is not a turnable intersection (need >= 2 arms)")
+    neighbor_ids = [a[0] for a in arms]
+
+    # Approach/exit arms from the route context, else the two sharpest arms.
+    in_idx = neighbor_ids.index(req.prev_id) if req.prev_id in neighbor_ids else 0
+    out_idx = neighbor_ids.index(req.next_id) if req.next_id in neighbor_ids else (1 if len(arms) > 1 else 0)
+    if in_idx == out_idx:
+        out_idx = (in_idx + 1) % len(arms)
+
+    # Verdict consistent with routing when we have the route context.
+    verdict = None
+    if req.prev_id and req.next_id:
+        feas = g.check_route_feasibility([req.prev_id, req.node_id, req.next_id], vehicle,
+                                         obstacles=_obstacles)
+        for r in feas:
+            if r["node_id"] == req.node_id:
+                verdict = r["verdict"]
+                break
+
+    node = g.nodes[req.node_id]
+    scene = build_corner(
+        (node.lon, node.lat),
+        [a[1] for a in arms],
+        in_idx=in_idx, out_idx=out_idx,
+        vehicle=vehicle,
+        intersection_id=req.node_id,
+        verdict=verdict,
+    )
+    scene["panorama"] = nearest_panorama(node.lat, node.lon)
+    return scene
 
 
 # ── Cyvl pass-throughs (optional overlays) ────────────────────────────────────

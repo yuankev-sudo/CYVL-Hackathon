@@ -6,6 +6,14 @@
   <title>ClearPath — Turn Feasibility Router</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <link rel="stylesheet" href="/static/css/style.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
 </head>
 <body>
   <div id="sidebar">
@@ -89,7 +97,27 @@
     </div>
   </div>
 
+  <!-- 3D maneuver simulator modal -->
+  <div id="corner-modal" class="hidden">
+    <div class="c3d-box">
+      <div class="c3d-header">
+        <div class="c3d-titles">
+          <div id="c3d-title">Corner</div>
+          <div id="c3d-sub" class="c3d-sub"></div>
+        </div>
+        <span id="c3d-verdict" class="verdict tight">tight</span>
+        <button id="c3d-close" class="c3d-x" onclick="closeCorner3D()">✕</button>
+      </div>
+      <div id="corner-canvas" class="c3d-canvas"></div>
+      <div class="c3d-foot">
+        <button id="c3d-play" onclick="toggleCorner3D()">⏸ Pause</button>
+        <div id="c3d-step" class="c3d-step">…</div>
+      </div>
+    </div>
+  </div>
+
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="/static/js/app.js"></script>
+  <script type="module" src="/static/js/intersection3d.js"></script>
 </body>
 </html>

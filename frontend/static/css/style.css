@@ -175,3 +175,38 @@ button.secondary { background: #22263a; border-color: #2a2d3a; color: #aaa; font
 .spinner { width: 36px; height: 36px; border: 3px solid #2a2d3a; border-top-color: #2563eb; border-radius: 50%; animation: spin .7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .loading-text { font-size: 13px; color: #aaa; }
+
+/* ── 3D maneuver simulator modal ─────────────────────────────────────────── */
+#corner-modal {
+  position: fixed; inset: 0; z-index: 2000;
+  background: rgba(5, 6, 9, .72);
+  display: flex; align-items: center; justify-content: center;
+}
+#corner-modal.hidden { display: none; }
+.c3d-box {
+  width: min(960px, 92vw); height: min(640px, 88vh);
+  background: #14161d; border: 1px solid #2a2d3a; border-radius: 14px;
+  display: flex; flex-direction: column; overflow: hidden;
+  box-shadow: 0 20px 60px rgba(0,0,0,.6);
+}
+.c3d-header {
+  display: flex; align-items: center; gap: 12px; padding: 12px 16px;
+  border-bottom: 1px solid #2a2d3a;
+}
+.c3d-titles { flex: 1; }
+#c3d-title { font-weight: 700; font-size: 15px; color: #fff; }
+.c3d-sub { font-size: 11px; color: #99a; margin-top: 2px; }
+.verdict { font-size: 11px; font-weight: 800; text-transform: uppercase; padding: 3px 10px; border-radius: 10px; }
+.verdict.tight { background: #78350f; color: #fde68a; }
+.verdict.fail  { background: #7f1d1d; color: #fca5a5; }
+.verdict.pass  { background: #166534; color: #86efac; }
+.c3d-x { width: auto; padding: 4px 10px; background: #22263a; border: 1px solid #2a2d3a; color: #ccc; border-radius: 8px; font-size: 14px; }
+.c3d-canvas { flex: 1; position: relative; min-height: 0; }
+.c3d-canvas canvas { display: block; }
+.c3d-foot { display: flex; align-items: center; gap: 14px; padding: 12px 16px; border-top: 1px solid #2a2d3a; }
+.c3d-foot #c3d-play { width: auto; padding: 8px 16px; flex: none; }
+.c3d-step { font-size: 13px; color: #e6e8ec; line-height: 1.4; }
+
+/* clickable conflict cards get a hint affordance */
+.result-card.fail, .result-card.tight { position: relative; }
+.result-card .sim-hint { font-size: 10px; color: #93c5fd; margin-top: 4px; font-weight: 600; }

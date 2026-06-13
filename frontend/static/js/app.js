@@ -178,6 +178,37 @@ map.on("click", e => {
   $("route-btn").disabled = !(startLatLng && endLatLng);
 });
 
+// ── Corner 3D maneuver simulator ───────────────────────────────────────────────
+// prev/next route context for a node, taken from the large-vehicle route the
+// truck actually drives (feasibility is now evaluated along that route).
+function routeContext(nodeId) {
+  const nodes = lastRouteData?.lv_nodes
+             || lastRouteData?.routes?.largevehicle?.geojson?.properties?.nodes || [];
+  const i = nodes.indexOf(nodeId);
+  return {
+    prev_id: i > 0 ? nodes[i - 1] : null,
+    next_id: (i >= 0 && i < nodes.length - 1) ? nodes[i + 1] : null,
+  };
+}
+
+// Only conflict corners are clickable -> we only build a 3D scene on demand.
+async function openCornerSim(b) {
+  if (!window.openCorner3D) { alert("3D module still loading — try again in a second."); return; }
+  setLoading(true, "Building 3D corner…");
+  try {
+    const res = await fetch("/api/corner", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        node_id: b.node_id, ...routeContext(b.node_id),
+        vehicle_id: $("vehicle-select").value, vehicle: readDims(),
+      }),
+    });
+    if (!res.ok) { alert("Corner sim error: " + ((await res.json()).detail || res.statusText)); return; }
+    window.openCorner3D(await res.json());
+  } catch (e) { alert("Corner sim failed: " + e.message); }
+  finally { setLoading(false); }
+}
+
 // ── Routing ──────────────────────────────────────────────────────────────────
 $("route-btn").addEventListener("click", findRoute);
 
@@ -231,7 +262,9 @@ function renderAllRoutes(data) {
     const color = b.verdict === "fail" ? "#ef4444" : "#f59e0b";
     const circle = L.circleMarker([b.lat, b.lon], {
       radius: 7, color, fillColor: color, fillOpacity: 0.9, weight: 2,
-    }).addTo(map).bindPopup(`<b>${b.verdict.toUpperCase()}</b><br>${b.reason || ""}`);
+    }).addTo(map)
+      .bindTooltip(`<b>${b.verdict.toUpperCase()}</b> — ${b.reason || ""}<br><i>click to simulate</i>`, { sticky: true })
+      .on("click", () => openCornerSim(b));
     blockedLayers.push(circle);
   });
 
@@ -323,11 +356,11 @@ function renderRouteSummaries(data) {
         <div class="name">Node ${b.node_id.slice(0, 8)}</div>
         <span class="badge ${b.verdict}">${b.verdict}</span>
         <div class="reason">${b.reason || ""}</div>
-        <div class="reason coords">${b.lat.toFixed(5)}, ${b.lon.toFixed(5)}</div>
+        <div class="sim-hint">▶ Click to simulate the turn in 3D</div>
       `;
       card.addEventListener("click", () => {
-        map.setView([b.lat, b.lon], 17);
         selectProfile("largevehicle");
+        openCornerSim(b);
       });
       el.appendChild(card);
     });
