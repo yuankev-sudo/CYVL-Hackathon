@@ -13,8 +13,14 @@ shapefiles (see routing/cyvl_graph.py). Plus thin Cyvl pass-throughs for the
 optional data overlays.
 """
 from __future__ import annotations
+import hashlib
+import io
 import os
+import urllib.parse
+import urllib.request
+from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from data.loaders import load_vehicle_templates
@@ -30,12 +36,16 @@ _cyvl_graph = None
 _obstacles: list[tuple[float, float]] = []
 
 
+_signs: list[dict] = []
+
+
 def _get_cyvl_graph():
-    global _cyvl_graph, _obstacles
+    global _cyvl_graph, _obstacles, _signs
     if _cyvl_graph is None:
         from routing.cyvl_graph import build_from_shapefiles
         _cyvl_graph = build_from_shapefiles()
         _obstacles = _load_obstacles()
+        _signs = _load_signs()
     return _cyvl_graph
 
 def _load_obstacles() -> list[tuple[float, float]]:
@@ -57,6 +67,133 @@ def _load_obstacles() -> list[tuple[float, float]]:
             lon, lat = geom["coordinates"][:2]
             pts.append((lon, lat))
     return pts
+
+def _load_signs() -> list[dict]:
+    """Load large-vehicle relevant signs from the Cyvl signs shapefile."""
+    import json
+    from pathlib import Path
+    import shapefile  # pyshp
+
+    shp = Path(__file__).parent.parent / "data" / "CityofSomervilleMAMarketingDemo-signs" / "tmpvw1yibth.shp"
+    if not shp.exists():
+        return []
+
+    # MUTCD code → (label, severity, assumed_clearance_ft or None)
+    SIGN_META = {
+        "W13-1P": ("Low Clearance",  "clearance", 13.5),
+        "R12-1":  ("Weight Limit",   "warning",   None),
+        "R12-2":  ("Weight Limit",   "warning",   None),
+        "R3-4":   ("No Trucks",      "block",     None),
+        "R3-5L":  ("No Trucks Left", "block",     None),
+        "W1-1R":  ("Sharp Curve Right", "info",   None),
+        "W1-1L":  ("Sharp Curve Left",  "info",   None),
+        "W1-8L":  ("Curve Left",     "info",      None),
+        "W1-8R":  ("Curve Right",    "info",      None),
+        "W1-4R":  ("Winding Road",   "info",      None),
+    }
+
+    signs = []
+    with shapefile.Reader(str(shp)) as sf:
+        for rec in sf.iterRecords():
+            mutcd = rec["mutcd"]
+            if mutcd not in SIGN_META:
+                continue
+            loc_raw = rec["location_"]
+            if not loc_raw:
+                continue
+            try:
+                loc = json.loads(loc_raw)
+            except Exception:
+                continue
+            lat, lon = loc.get("lat"), loc.get("lon")
+            if lat is None or lon is None:
+                continue
+            label, severity, clearance_ft = SIGN_META[mutcd]
+            signs.append({
+                "mutcd":        mutcd,
+                "label":        label,
+                "severity":     severity,
+                "clearance_ft": clearance_ft,
+                "lat":          lat,
+                "lon":          lon,
+                "image_url":    rec["image_url"] or None,
+                "condition":    rec["condition"] or None,
+            })
+    return signs
+
+
+def _find_route_signs(
+    g,
+    path: list[str],
+    signs: list[dict],
+    vehicle_height_ft: float | None,
+    proximity_m: float = 40.0,
+) -> list[dict]:
+    """
+    Return signs within proximity_m of the route path, enriched with a
+    vehicle-specific severity assessment.
+    """
+    if not signs or not path:
+        return []
+
+    from routing.cyvl_graph import _haversine_m
+
+    # Collect all coordinate points along the route
+    route_pts: list[tuple[float, float]] = []
+    for a, b in zip(path, path[1:]):
+        edge = g.edge_meta.get((a, b)) or g.edge_meta.get((b, a))
+        if edge:
+            route_pts.extend(edge.points)
+
+    if not route_pts:
+        return []
+
+    warnings = []
+    for sign in signs:
+        dist = min(
+            _haversine_m(sign["lon"], sign["lat"], pt[0], pt[1])
+            for pt in route_pts
+        )
+        if dist > proximity_m:
+            continue
+
+        entry = dict(sign, distance_m=round(dist))
+
+        # Assess against vehicle height for clearance signs
+        if sign["severity"] == "clearance" and sign["clearance_ft"] and vehicle_height_ft:
+            margin = sign["clearance_ft"] - vehicle_height_ft
+            if margin < 0:
+                entry["verdict"] = "fail"
+                entry["message"] = (
+                    f"Low clearance ({sign['clearance_ft']}ft assumed) — "
+                    f"vehicle is {vehicle_height_ft}ft tall, {abs(margin):.1f}ft too tall to pass safely."
+                )
+            elif margin < 1.0:
+                entry["verdict"] = "tight"
+                entry["message"] = (
+                    f"Low clearance ({sign['clearance_ft']}ft assumed) — "
+                    f"only {margin:.1f}ft of headroom for a {vehicle_height_ft}ft vehicle. Proceed with caution."
+                )
+            else:
+                entry["verdict"] = "warn"
+                entry["message"] = (
+                    f"Low clearance sign ahead. Assumed {sign['clearance_ft']}ft clearance, "
+                    f"vehicle is {vehicle_height_ft}ft — {margin:.1f}ft margin. Verify before proceeding."
+                )
+        elif sign["severity"] == "block":
+            entry["verdict"] = "fail"
+            entry["message"] = f"{sign['label']} — this road legally restricts truck access."
+        elif sign["severity"] == "warning":
+            entry["verdict"] = "warn"
+            entry["message"] = f"{sign['label']} — verify your vehicle meets the posted restriction."
+        else:
+            entry["verdict"] = "info"
+            entry["message"] = f"{sign['label']} ahead — reduce speed and proceed carefully."
+
+        warnings.append(entry)
+
+    return sorted(warnings, key=lambda s: s["distance_m"])
+
 
 # ── Models ──────────────────────────────────────────────────────────────────
 
@@ -136,6 +273,28 @@ def _path_length_m(g, path: list[str] | None) -> int | None:
         if e:
             total += e.length_m
     return round(total)
+
+
+# Average speeds (mph) per profile — reflects realistic urban Somerville pace
+_PROFILE_SPEED_MPH = {
+    "fastest":      22,   # normal city driving
+    "smoothest":    18,   # cautious / ambulance
+    "largevehicle": 14,   # slow for large trucks navigating tight streets
+}
+
+
+def _trip_time_min(length_m: int | None, profile: str) -> float | None:
+    if length_m is None:
+        return None
+    mph = _PROFILE_SPEED_MPH.get(profile, 20)
+    miles = length_m / 1609.344
+    return round(miles / mph * 60, 1)
+
+
+def _miles(length_m: int | None) -> float | None:
+    if length_m is None:
+        return None
+    return round(length_m / 1609.344, 2)
 
 
 # ── Reference ─────────────────────────────────────────────────────────────────
@@ -239,13 +398,15 @@ def dynamic_route(req: DynamicRouteRequest):
                     "turning_radius_ft": tg.turning_radius_ft, "outer_radius_ft": tg.outer_radius_ft,
                     "swept_width_ft": tg.swept_width_ft},
         "stats": {
-            "naive_length_m": _path_length_m(g, naive_path),
-            "safe_length_m": _path_length_m(g, chosen_path),
-            "naive_avg_pci": _route_avg_pci(g, naive_path),
-            "safe_avg_pci": _route_avg_pci(g, chosen_path),
+            "naive_length_m":    _path_length_m(g, naive_path),
+            "safe_length_m":     _path_length_m(g, chosen_path),
+            "distance_miles":    _miles(_path_length_m(g, chosen_path)),
+            "time_min":          _trip_time_min(_path_length_m(g, chosen_path), req.profile),
+            "naive_avg_pci":     _route_avg_pci(g, naive_path),
+            "safe_avg_pci":      _route_avg_pci(g, chosen_path),
             "intersections_checked": len(feasibility),
-            "blocked_count": len(blocked_ids),
-            "vehicle": vehicle.get("name"),
+            "blocked_count":     len(blocked_ids),
+            "vehicle":           vehicle.get("name"),
         },
     }
 
@@ -258,7 +419,8 @@ class AllRoutesRequest(BaseModel):
     end_lat: float
     end_lon: float
     vehicle_id: str | None = None
-    vehicle: dict | None = None  # dimension overrides for the truck profile
+    vehicle: dict | None = None
+    height_ft: float | None = None  # override vehicle height for clearance checks
 
 
 ROUTE_COLORS = {
@@ -313,22 +475,30 @@ def all_routes(req: AllRoutesRequest):
         routes[profile] = {
             "geojson": gj,
             "stats": {
-                "length_m":             length_m,
-                "extra_m":              (length_m or 0) - (naive_len or 0),
-                "avg_pci":              avg_pci,
-                "naive_avg_pci":        naive_pci,
-                "blocked_count":        len(blocks),
+                "length_m":              length_m,
+                "distance_miles":        _miles(length_m),
+                "time_min":              _trip_time_min(length_m, profile),
+                "extra_m":               (length_m or 0) - (naive_len or 0),
+                "avg_pci":               avg_pci,
+                "naive_avg_pci":         naive_pci,
+                "blocked_count":         len(blocks),
                 "intersections_checked": len(feasibility),
             },
         }
 
     # Conflict corners ON the route the truck actually drives (the large-vehicle
-    # path) — these are the tight turns a driver must operate carefully and can
-    # simulate. The fail corners it routed around are reported separately.
+    # path) — the tight turns a driver must operate carefully and can simulate.
+    # The fail corners it routed around are reported separately.
     lv_path = paths["largevehicle"]
     route_feasibility = g.check_route_feasibility(lv_path, vehicle, obstacles=_obstacles)
     lv_node_set = set(lv_path)
     avoided = [r for r in feasibility if r["verdict"] == "fail" and r["node_id"] not in lv_node_set]
+
+    # MUTCD sign warnings (low clearance, no-trucks, weight limits) along each
+    # route, assessed against the vehicle height (explicit override > template).
+    height_ft = req.height_ft or vehicle.get("height_ft")
+    for profile, r in routes.items():
+        r["sign_warnings"] = _find_route_signs(g, paths[profile], _signs, height_ft)
 
     sn, en = g.nodes[start_node], g.nodes[end_node]
     return {
@@ -341,6 +511,7 @@ def all_routes(req: AllRoutesRequest):
         "vehicle": {
             "id":                vehicle["id"],
             "name":              vehicle.get("name"),
+            "height_ft":         height_ft,
             "turning_radius_ft": tg.turning_radius_ft,
             "outer_radius_ft":   tg.outer_radius_ft,
             "swept_width_ft":    tg.swept_width_ft,
@@ -460,3 +631,82 @@ def cyvl_pavement(lon: float = Query(...), lat: float = Query(...), radius_m: fl
     _require_cyvl()
     from data.cyvl_client import get_pavement_scores, radius_filter
     return get_pavement_scores(SOMERVILLE_PROJECT_ID, radius_filter(lat, lon, radius_m))
+
+
+@router.get("/intersection/imagery")
+def intersection_imagery(
+    lon: float = Query(...),
+    lat: float = Query(...),
+    radius_m: float = Query(30),
+    verdict: str | None = Query(None),     # "fail" | "tight" — tunes the search query
+):
+    """
+    Street-level photos near a failing/tight turn so the user can *see* the
+    obstruction. Each failure point gets a real, high-quality 3D/360° photo.
+
+    Source order:
+      1. Bundled Cyvl imagery shapefiles in data/ (no API key needed) — the
+         nearest 360° panoramic frame to the turn. This always works.
+      2. If that finds nothing, live Cyvl semantic search (when a key is set).
+
+    Best-effort: returns {"images": []} if nothing is found, so the UI degrades
+    gracefully.
+    """
+    from data.local_imagery import nearby_imagery as local_imagery
+    # Local 360° frames keyed by proximity — the "3D high quality photo" of the
+    # exact spot the swept path fails.
+    images = local_imagery(lat, lon, radius_m=max(radius_m, 40), limit=2, layer="panoramic")
+
+    if not images and _USE_CYVL:
+        from data.cyvl_client import nearby_imagery as cyvl_imagery
+        query = "narrow intersection corner with curb and obstructions blocking a wide turn"
+        if verdict == "tight":
+            query = "tight street corner with curb, parked cars, and roadside objects"
+        images = cyvl_imagery(SOMERVILLE_PROJECT_ID, lat, lon, radius_m=radius_m, query=query)
+
+    return {"images": images}
+
+
+# ── Thumbnail proxy ───────────────────────────────────────────────────────────
+# The bundled 360° frames are full-resolution equirectangular jpgs (~3-4 MB
+# each). Loading several of those raw as <img> thumbnails is what makes the
+# "Loading site photos…" spinner hang. This downloads each frame once, resizes
+# it small, caches it to disk, and serves the lightweight version — so repeat
+# views are instant.
+
+_THUMB_CACHE = Path(__file__).parent.parent / "data" / ".thumb_cache"
+_THUMB_HOSTS = ("cloudfront.net", "cyvl.ai", "cyvl.app")
+
+
+@router.get("/intersection/photo-thumb")
+def photo_thumb(url: str = Query(...), w: int = Query(480, ge=64, le=1024)):
+    """Resized, disk-cached thumbnail of a remote frame jpg."""
+    host = urllib.parse.urlparse(url).hostname or ""
+    if not url.startswith("https://") or not any(host.endswith(h) for h in _THUMB_HOSTS):
+        raise HTTPException(400, "URL not allowed")
+
+    _THUMB_CACHE.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha1(f"{url}|{w}".encode()).hexdigest()
+    cache_file = _THUMB_CACHE / f"{key}.jpg"
+    if cache_file.exists():
+        return Response(cache_file.read_bytes(), media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+    try:
+        from PIL import Image
+        req = urllib.request.Request(url, headers={"User-Agent": "ClearPath/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read()
+        img = Image.open(io.BytesIO(raw))
+        img = img.convert("RGB")
+        if img.width > w:
+            img = img.resize((w, max(1, round(img.height * w / img.width))), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=80, optimize=True)
+        data = buf.getvalue()
+    except Exception as e:
+        raise HTTPException(502, f"Could not fetch image: {e}")
+
+    cache_file.write_bytes(data)
+    return Response(data, media_type="image/jpeg",
+                    headers={"Cache-Control": "public, max-age=86400"})

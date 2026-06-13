@@ -297,6 +297,102 @@ def browse_images(
     return _post("/api/v1/embeddings/browse", body)
 
 
+# ── Imagery normalization ─────────────────────────────────────────────────────
+# The embeddings/imagery endpoints return slightly different shapes; we don't
+# want the UI to care. These helpers flatten whatever comes back into a simple
+# list of {url, thumb, score, lat, lon, caption} so a failing turn can show the
+# street-level photo of *why* it fails.
+
+_URL_KEYS = ("image_url", "imageUrl", "signed_url", "signedUrl", "url",
+             "src", "href", "image", "full_url", "original_url")
+_THUMB_KEYS = ("thumbnail_url", "thumbnailUrl", "thumb_url", "thumb",
+               "thumbnail", "preview_url", "small_url")
+_LAT_KEYS = ("lat", "latitude", "image_lat", "capture_lat", "y")
+_LON_KEYS = ("lon", "lng", "longitude", "image_lon", "image_lng", "capture_lon", "x")
+_SCORE_KEYS = ("score", "similarity", "distance", "relevance")
+_IMG_EXT = (".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff")
+
+
+def _looks_like_image_url(val: Any) -> bool:
+    if not isinstance(val, str) or not val.startswith(("http://", "https://")):
+        return False
+    low = val.split("?", 1)[0].lower()
+    return low.endswith(_IMG_EXT) or any(t in val.lower() for t in ("image", "img", "thumb", "photo", "frame"))
+
+
+def _first(d: dict, keys: tuple) -> Any:
+    for k in keys:
+        if k in d and d[k] is not None:
+            return d[k]
+    return None
+
+
+def _normalize_image_item(item: dict) -> dict | None:
+    """Pull a usable image record out of one result dict, or None if no URL."""
+    url = _first(item, _URL_KEYS)
+    if not _looks_like_image_url(url):
+        # Sometimes the URL is nested (e.g. item["image"]["url"]).
+        for v in item.values():
+            if isinstance(v, dict):
+                nested = _first(v, _URL_KEYS)
+                if _looks_like_image_url(nested):
+                    url = nested
+                    break
+    if not _looks_like_image_url(url):
+        return None
+    thumb = _first(item, _THUMB_KEYS)
+    return {
+        "url": url,
+        "thumb": thumb if _looks_like_image_url(thumb) else url,
+        "score": _first(item, _SCORE_KEYS),
+        "lat": _first(item, _LAT_KEYS),
+        "lon": _first(item, _LON_KEYS),
+        "caption": item.get("caption") or item.get("description") or item.get("label"),
+    }
+
+
+def _result_items(payload: Any) -> list[dict]:
+    """Find the list of image records inside an arbitrary response envelope."""
+    if isinstance(payload, list):
+        return [x for x in payload if isinstance(x, dict)]
+    if isinstance(payload, dict):
+        for key in ("results", "images", "items", "data", "matches", "hits"):
+            v = payload.get(key)
+            if isinstance(v, list):
+                return [x for x in v if isinstance(x, dict)]
+        # Single image record returned bare.
+        if _first(payload, _URL_KEYS):
+            return [payload]
+    return []
+
+
+def nearby_imagery(
+    project_id: str,
+    lat: float,
+    lon: float,
+    radius_m: float = 30.0,
+    query: str | None = None,
+    limit: int = 6,
+) -> list[dict]:
+    """
+    Best-effort street-level photos near a point. Tries semantic search (when a
+    query is given) then falls back to a spatial browse. Always returns a list
+    (possibly empty) — never raises — so the demo survives any API hiccup.
+    """
+    spatial = radius_filter(lat, lon, radius_m)
+    out: list[dict] = []
+    try:
+        if query:
+            payload = search_images(query, project_id=project_id, spatial=spatial, page_size=limit)
+            out = [r for r in (_normalize_image_item(i) for i in _result_items(payload)) if r]
+        if not out:
+            payload = browse_images(project_id=project_id, spatial=intersection_bbox(lon, lat), page_size=limit)
+            out = [r for r in (_normalize_image_item(i) for i in _result_items(payload)) if r]
+    except Exception:  # network, auth, shape — anything. Photos are a bonus, not a blocker.
+        return []
+    return out[:limit]
+
+
 # ── Health ────────────────────────────────────────────────────────────────────
 
 def health() -> dict:

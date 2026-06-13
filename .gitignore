@@ -5,3 +5,6 @@ __pycache__/
 .venv/
 *.egg-info/
 data/.cache/
+
+# generated imagery thumbnail cache
+data/.thumb_cache/
