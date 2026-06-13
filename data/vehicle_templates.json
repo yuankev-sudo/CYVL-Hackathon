@@ -1,0 +1,38 @@
+{
+  "WB-67": {
+    "name": "WB-67 Tractor-Trailer",
+    "length_ft": 67,
+    "width_ft": 8.5,
+    "turning_radius_ft": 45.0,
+    "overhang_front_ft": 4.0,
+    "overhang_rear_ft": 3.5,
+    "track_width_ft": 8.0
+  },
+  "SU-30": {
+    "name": "SU-30 Single-Unit Truck",
+    "length_ft": 30,
+    "width_ft": 8.0,
+    "turning_radius_ft": 28.0,
+    "overhang_front_ft": 4.0,
+    "overhang_rear_ft": 6.0,
+    "track_width_ft": 7.5
+  },
+  "FIRE-LADDER": {
+    "name": "Fire Ladder Apparatus",
+    "length_ft": 45,
+    "width_ft": 8.5,
+    "turning_radius_ft": 38.0,
+    "overhang_front_ft": 5.0,
+    "overhang_rear_ft": 8.5,
+    "track_width_ft": 8.0
+  },
+  "BUS-40": {
+    "name": "40ft Transit Bus",
+    "length_ft": 40,
+    "width_ft": 8.5,
+    "turning_radius_ft": 34.0,
+    "overhang_front_ft": 7.5,
+    "overhang_rear_ft": 7.5,
+    "track_width_ft": 7.75
+  }
+}

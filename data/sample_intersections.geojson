@@ -1,0 +1,59 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "intersection-001",
+        "name": "Main St & Oak Ave (Tight Right Turn)",
+        "description": "Narrow right turn — curb radius ~15ft, fails WB-67 and fire ladder"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-122.4194, 37.7749],
+          [-122.4190, 37.7749],
+          [-122.4190, 37.7753],
+          [-122.4194, 37.7753],
+          [-122.4194, 37.7749]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "intersection-002",
+        "name": "Broad St & 5th Ave (Wide Intersection)",
+        "description": "Standard intersection — 35ft curb radius, passes most vehicles"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-122.4180, 37.7745],
+          [-122.4174, 37.7745],
+          [-122.4174, 37.7751],
+          [-122.4180, 37.7751],
+          [-122.4180, 37.7745]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "intersection-003",
+        "name": "Industrial Blvd & Depot Rd (Overhead Obstruction)",
+        "description": "Low overpass — 13.5ft clearance, tree encroachment on right"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-122.4165, 37.7740],
+          [-122.4158, 37.7740],
+          [-122.4158, 37.7746],
+          [-122.4165, 37.7746],
+          [-122.4165, 37.7740]
+        ]]
+      }
+    }
+  ]
+}
