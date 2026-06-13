@@ -3,25 +3,59 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ClearPath — Turn Feasibility</title>
+  <title>ClearPath — LiDAR-aware routing</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <link rel="stylesheet" href="/static/css/style.css" />
 </head>
 <body>
-  <div id="sidebar">
-    <h1>ClearPath</h1>
-    <p class="subtitle">LiDAR-powered turn feasibility for large vehicles</p>
+  <div id="map"></div>
 
-    <label for="vehicle-select">Vehicle</label>
-    <select id="vehicle-select"></select>
+  <div id="panel">
+    <div class="brand">
+      <h1>ClearPath</h1>
+      <span id="source-badge" class="badge-baked">demo data</span>
+    </div>
+    <p class="tagline">Routing off measured pavement reality — not a restriction database.</p>
 
-    <button id="check-btn">Check Feasibility</button>
-    <button id="route-btn">Find Safe Route</button>
+    <!-- Profile picker, Google-Maps mode-tabs style -->
+    <div id="profiles">
+      <button class="profile active" data-profile="fastest"     title="Shortest travel time">
+        <span class="ico">🚗</span><span>Fastest</span></button>
+      <button class="profile" data-profile="smoothest"          title="Smoothest pavement — for ambulances">
+        <span class="ico">🚑</span><span>Smoothest</span></button>
+      <button class="profile" data-profile="largevehicle"       title="Fits a large vehicle's turns">
+        <span class="ico">🚛</span><span>Large&nbsp;Vehicle</span></button>
+    </div>
+
+    <!-- Trip endpoints -->
+    <div class="field">
+      <label>Start</label>
+      <div class="endpoint origin"><span class="dot green"></span><span id="start-name">Star Market</span></div>
+    </div>
+    <div class="field">
+      <label for="dest-select">Destination</label>
+      <select id="dest-select"></select>
+    </div>
+
+    <!-- Truck dimension form (large vehicle only) -->
+    <div id="truck-form" class="hidden">
+      <div class="field">
+        <label for="preset-select">Vehicle preset</label>
+        <select id="preset-select"></select>
+      </div>
+      <div class="dims">
+        <div><label for="d-length">Length (ft)</label><input id="d-length" type="number" step="0.5"></div>
+        <div><label for="d-width">Width (ft)</label><input id="d-width" type="number" step="0.1"></div>
+        <div><label for="d-wheelbase">Wheelbase (ft)</label><input id="d-wheelbase" type="number" step="0.5"></div>
+        <div><label for="d-radius">Turn radius (ft)</label><input id="d-radius" type="number" step="0.5"></div>
+      </div>
+      <p class="hint" id="swept-hint"></p>
+    </div>
+
+    <button id="go-btn">Get Directions</button>
 
     <div id="results"></div>
   </div>
-
-  <div id="map"></div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="/static/js/app.js"></script>

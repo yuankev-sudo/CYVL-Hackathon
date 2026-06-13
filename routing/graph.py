@@ -1,115 +1,170 @@
 """
-Build a route graph from intersections and find paths that avoid FAIL turns.
-Simple adjacency-based graph — nodes are intersections, edges are road segments.
+Profile-aware routing over the demo corridor.
+
+Three routing profiles, each a different edge-cost function over the same graph:
+
+  fastest      — minimize distance (proxy for travel time).
+  smoothest    — minimize distance penalized by pavement roughness (low PCI).
+                 This is the "ambulance" profile: avoid potholes for the patient.
+  largevehicle — HARD-block any intersection whose swept path overruns the curb
+                 for the given vehicle, and penalize "tight" turns. This is the
+                 physical-feasibility profile that ordinary routers lack.
+
+`plan_route` returns both the naive fastest route (the "before") and the
+profile route (the "after") so the frontend can show the reroute.
 """
 from __future__ import annotations
-from dataclasses import dataclass, field
-from collections import defaultdict
 import heapq
+from collections import defaultdict
 
+from data.scenario import Scenario, build_scenario
 from sweptpath.interface import Verdict, SweptPathResult
+from sweptpath.autodesk_backend import compute_swept_path
+
+# smoothness: pavement below this PCI starts to hurt; weight the deficit hard.
+SMOOTH_K = 3.0
+SMOOTH_PCI_TARGET = 70.0
+# largevehicle: extra "virtual distance" for routing through a tight corner.
+TIGHT_TURN_PENALTY_M = 250.0
+DEFAULT_SPEED_MPS = 8.94  # ~20 mph surface streets
 
 
-@dataclass
-class Node:
-    id: str
-    lon: float
-    lat: float
+def _roughness(pci: float | None) -> float:
+    pci = 75.0 if pci is None else pci
+    return max(0.0, (SMOOTH_PCI_TARGET - pci)) / SMOOTH_PCI_TARGET
 
 
-@dataclass
-class Graph:
-    nodes: dict[str, Node] = field(default_factory=dict)
-    edges: dict[str, list[tuple[str, float]]] = field(default_factory=lambda: defaultdict(list))
+def _feasibility(scenario: Scenario, vehicle: dict) -> dict[str, SweptPathResult]:
+    """Swept-path verdict for every intersection node (origins/dests skipped)."""
+    out: dict[str, SweptPathResult] = {}
+    for nid, geom in scenario.geometry.items():
+        if scenario.nodes[nid]["kind"] != "intersection":
+            continue
+        out[nid] = compute_swept_path(geom, vehicle)
+    return out
 
-    def add_node(self, node: Node):
-        self.nodes[node.id] = node
 
-    def add_edge(self, from_id: str, to_id: str, weight: float = 1.0):
-        self.edges[from_id].append((to_id, weight))
-        self.edges[to_id].append((from_id, weight))
+def _edge_weight(profile: str, length_m: float, pci: float,
+                 node_b_penalty: float) -> float:
+    if profile == "smoothest":
+        return length_m * (1.0 + SMOOTH_K * _roughness(pci))
+    if profile == "largevehicle":
+        return length_m + node_b_penalty
+    return length_m  # fastest
 
-    def dijkstra(self, start: str, end: str, blocked: set[str]) -> list[str] | None:
-        """Return shortest node-id path from start to end, skipping blocked nodes."""
-        dist = {start: 0.0}
-        prev: dict[str, str | None] = {start: None}
-        pq = [(0.0, start)]
 
-        while pq:
-            d, u = heapq.heappop(pq)
-            if u == end:
-                path = []
-                while u is not None:
-                    path.append(u)
-                    u = prev[u]
-                return list(reversed(path))
-            if d > dist.get(u, float("inf")):
+def _dijkstra(scenario: Scenario, start: str, end: str, profile: str,
+              blocked: set[str], tight: set[str]) -> list[str] | None:
+    adj: dict[str, list[tuple[str, float]]] = defaultdict(list)
+    for e in scenario.edges:
+        for a, b in ((e.a, e.b), (e.b, e.a)):
+            if b in blocked:
                 continue
-            for v, w in self.edges[u]:
-                if v in blocked:
-                    continue
-                nd = d + w
-                if nd < dist.get(v, float("inf")):
-                    dist[v] = nd
-                    prev[v] = u
-                    heapq.heappush(pq, (nd, v))
-        return None
+            penalty = TIGHT_TURN_PENALTY_M if (profile == "largevehicle" and b in tight) else 0.0
+            adj[a].append((b, _edge_weight(profile, e.length_m, e.pci, penalty)))
+
+    dist = {start: 0.0}
+    prev: dict[str, str | None] = {start: None}
+    pq = [(0.0, start)]
+    while pq:
+        d, u = heapq.heappop(pq)
+        if u == end:
+            path, cur = [], u
+            while cur is not None:
+                path.append(cur)
+                cur = prev[cur]
+            return list(reversed(path))
+        if d > dist.get(u, float("inf")):
+            continue
+        for v, w in adj[u]:
+            nd = d + w
+            if nd < dist.get(v, float("inf")):
+                dist[v] = nd
+                prev[v] = u
+                heapq.heappush(pq, (nd, v))
+    return None
 
 
-def build_demo_graph() -> Graph:
-    """Hardcoded demo graph matching the three sample intersections."""
-    g = Graph()
-    g.add_node(Node("intersection-001", -122.4192, 37.7751))
-    g.add_node(Node("intersection-002", -122.4177, 37.7748))
-    g.add_node(Node("intersection-003", -122.4162, 37.7743))
-    g.add_node(Node("start",            -122.4200, 37.7755))
-    g.add_node(Node("end",              -122.4150, 37.7738))
-
-    g.add_edge("start",            "intersection-001", 1.0)
-    g.add_edge("intersection-001", "intersection-002", 1.0)
-    g.add_edge("intersection-002", "intersection-003", 1.0)
-    g.add_edge("intersection-003", "end",              1.0)
-    # alternate route bypassing intersection-001
-    g.add_edge("start",            "intersection-002", 1.8)
-    return g
+def _edge_lookup(scenario: Scenario) -> dict[tuple[str, str], object]:
+    lut = {}
+    for e in scenario.edges:
+        lut[(e.a, e.b)] = e
+        lut[(e.b, e.a)] = e
+    return lut
 
 
-def route(
-    graph: Graph,
-    start: str,
-    end: str,
-    feasibility: list[SweptPathResult],
-) -> dict:
-    """Return naive route and (if needed) a rerouted alternative."""
-    blocked = {r.intersection_id for r in feasibility if r.verdict == Verdict.FAIL}
+def _metrics(scenario: Scenario, path: list[str] | None) -> dict:
+    if not path:
+        return {"distance_m": None, "eta_min": None, "avg_pci": None}
+    lut = _edge_lookup(scenario)
+    dist = num = den = 0.0
+    for a, b in zip(path, path[1:]):
+        e = lut[(a, b)]
+        dist += e.length_m
+        num += e.pci * e.length_m
+        den += e.length_m
+    return {
+        "distance_m": round(dist),
+        "eta_min": round(dist / DEFAULT_SPEED_MPS / 60.0, 1),
+        "avg_pci": round(num / den, 1) if den else None,
+    }
 
-    naive = graph.dijkstra(start, end, blocked=set())
-    safe  = graph.dijkstra(start, end, blocked=blocked)
+
+def plan_route(scenario: Scenario, start: str, end: str, profile: str,
+               vehicle: dict | None = None) -> dict:
+    """Plan a route under `profile`. Returns naive + chosen routes and metrics."""
+    blocked: set[str] = set()
+    tight: set[str] = set()
+    feasibility_payload = None
+
+    if profile == "largevehicle":
+        if not vehicle:
+            raise ValueError("largevehicle profile requires vehicle dimensions")
+        feas = _feasibility(scenario, vehicle)
+        blocked = {nid for nid, r in feas.items() if r.verdict == Verdict.FAIL}
+        tight = {nid for nid, r in feas.items() if r.verdict == Verdict.TIGHT}
+        feasibility_payload = {
+            nid: {
+                "verdict": r.verdict.value,
+                "reason": r.reason,
+                "clearance_margin_ft": r.clearance_margin_ft,
+                "swept_polygon": r.swept_polygon,
+            } for nid, r in feas.items()
+        }
+
+    # "Before": a naive fastest route that ignores feasibility/comfort.
+    naive = _dijkstra(scenario, start, end, "fastest", blocked=set(), tight=set())
+    # "After": the route under the requested profile (with constraints applied).
+    chosen = _dijkstra(scenario, start, end, profile, blocked=blocked, tight=tight)
+
+    blocked_on_naive = sorted(blocked.intersection(naive or []))
 
     return {
+        "profile": profile,
+        "start": start,
+        "end": end,
         "naive_route": naive,
-        "safe_route":  safe,
-        "blocked_intersections": list(blocked),
-        "rerouted": naive != safe,
+        "route": chosen,
+        "rerouted": naive != chosen,
+        "blocked_intersections": sorted(blocked),
+        "blocked_on_naive_route": blocked_on_naive,
+        "tight_intersections": sorted(tight),
+        "feasibility": feasibility_payload,
+        "metrics": _metrics(scenario, chosen),
+        "naive_metrics": _metrics(scenario, naive),
     }
 
 
 if __name__ == "__main__":
     from data.loaders import load_vehicle_templates
-    from geometry.extractor import load_all_from_geojson
-    from sweptpath.shapely_backend import compute_swept_path
 
+    sc = build_scenario(live=False)
     vehicles = load_vehicle_templates()
-    intersections = load_all_from_geojson()
-    vehicle = vehicles["FIRE-LADDER"]
-    vehicle["id"] = "FIRE-LADDER"
+    wb67 = dict(vehicles["WB-67"], id="WB-67")
 
-    feasibility = [compute_swept_path(i, vehicle) for i in intersections]
-    for r in feasibility:
-        print(f"{r.intersection_id}: {r.verdict.value}  {r.reason or ''}")
-
-    graph = build_demo_graph()
-    result = route(graph, "start", "end", feasibility)
-    print("\nNaive route:", result["naive_route"])
-    print("Safe  route:", result["safe_route"])
-    print("Rerouted?  ", result["rerouted"])
+    for profile, veh in [("fastest", None), ("smoothest", None), ("largevehicle", wb67)]:
+        r = plan_route(sc, "star_market", "market_basket", profile, veh)
+        m = r["metrics"]
+        print(f"\n[{profile}]  ->  {r['route']}")
+        print(f"   dist={m['distance_m']}m  eta={m['eta_min']}min  avg_pci={m['avg_pci']}  "
+              f"rerouted={r['rerouted']}  blocked={r['blocked_intersections']}")

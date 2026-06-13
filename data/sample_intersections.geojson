@@ -1,69 +1,51 @@
 {
   "type": "FeatureCollection",
-  "_note": "Real Somerville, MA intersections used as hardcoded fallback when Cyvl API is unavailable. Curb polygons are approximate — replace with API geometry when connected.",
+  "_note": "Generic fallback intersections. The live demo corridor lives in data/scenario.py; these keep the standalone module demos runnable with zero network.",
   "features": [
     {
       "type": "Feature",
       "properties": {
-        "id": "somerville-medford-pearl",
-        "name": "Medford St & Pearl St (Tight Right Turn)",
-        "description": "Narrow right turn onto Pearl St — historically difficult for fire apparatus",
-        "curb_radius_ft": 14,
-        "clearance_height_m": null,
-        "encroachments": []
+        "id": "somerville-park-tight",
+        "name": "Somerville Ave & Park St (Tight Corner)",
+        "description": "Narrow curb return — historically difficult for fire apparatus / semis",
+        "lon": -71.1050, "lat": 42.3805,
+        "corner_radius_ft": 12,
+        "road_width_ft": 26,
+        "turn_angle_deg": 90,
+        "pci": 58,
+        "obstacles": [{"type": "traffic_signal_pole", "lon": -71.10498, "lat": 42.38052}]
       },
-      "geometry": {
-        "type": "Polygon",
-        "coordinates": [[
-          [-71.0997, 42.3823],
-          [-71.0993, 42.3823],
-          [-71.0993, 42.3827],
-          [-71.0997, 42.3827],
-          [-71.0997, 42.3823]
-        ]]
-      }
+      "geometry": {"type": "Point", "coordinates": [-71.1050, 42.3805]}
     },
     {
       "type": "Feature",
       "properties": {
         "id": "somerville-holland-broadway",
         "name": "Holland St & Broadway (Davis Square)",
-        "description": "Moderate turn — 28ft curb radius, standard bus route",
-        "curb_radius_ft": 28,
-        "clearance_height_m": null,
-        "encroachments": []
+        "description": "Moderate corner — standard bus route",
+        "lon": -71.1215, "lat": 42.3967,
+        "corner_radius_ft": 25,
+        "road_width_ft": 30,
+        "turn_angle_deg": 90,
+        "pci": 81,
+        "obstacles": []
       },
-      "geometry": {
-        "type": "Polygon",
-        "coordinates": [[
-          [-71.1218, 42.3965],
-          [-71.1212, 42.3965],
-          [-71.1212, 42.3970],
-          [-71.1218, 42.3970],
-          [-71.1218, 42.3965]
-        ]]
-      }
+      "geometry": {"type": "Point", "coordinates": [-71.1215, 42.3967]}
     },
     {
       "type": "Feature",
       "properties": {
         "id": "somerville-mcgrath-washington",
         "name": "McGrath Hwy & Washington St",
-        "description": "Wide arterial intersection — large curb radius, clear of obstructions",
-        "curb_radius_ft": 38,
-        "clearance_height_m": null,
-        "encroachments": []
+        "description": "Wide arterial — large curb radius, clear of obstructions",
+        "lon": -71.0946, "lat": 42.3818,
+        "corner_radius_ft": 35,
+        "road_width_ft": 44,
+        "turn_angle_deg": 90,
+        "pci": 72,
+        "obstacles": []
       },
-      "geometry": {
-        "type": "Polygon",
-        "coordinates": [[
-          [-71.0950, 42.3815],
-          [-71.0942, 42.3815],
-          [-71.0942, 42.3821],
-          [-71.0950, 42.3821],
-          [-71.0950, 42.3815]
-        ]]
-      }
+      "geometry": {"type": "Point", "coordinates": [-71.0946, 42.3818]}
     }
   ]
 }

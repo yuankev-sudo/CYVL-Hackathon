@@ -1,187 +1,176 @@
-"""API routes for feasibility checks and routing."""
+"""
+ClearPath API.
+
+The frontend is a Google-Maps-style planner:
+  GET  /scenario        -> the corridor (nodes, edges, origin, destinations)
+  GET  /vehicles        -> AASHTO presets (prefill the truck dimension form)
+  POST /turning-radius  -> dimensions -> turning geometry (live form helper)
+  POST /route           -> plan a route under a profile (+ vehicle for trucks)
+
+Plus thin Cyvl pass-throughs for the optional data overlays.
+"""
 from __future__ import annotations
 import os
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from data.loaders import load_vehicle_templates, load_intersections, load_intersections_live
-from geometry.extractor import load_from_geojson
-from geometry.from_cyvl import build_from_cyvl, build_all_somerville
-from sweptpath.autodesk_backend import compute_swept_path
-from routing.osm_graph import get_graph, route, build_demo_graph
+from data.loaders import load_vehicle_templates
+from data.scenario import build_scenario, Scenario
+from geometry.turning import turning_geometry
+from routing.graph import plan_route
 
 router = APIRouter()
 
 _USE_CYVL = bool(os.getenv("CYVL_API_KEY"))
 
 
-class FeasibilityRequest(BaseModel):
-    vehicle_id: str
-    intersection_ids: list[str] | None = None
-
+# ── Models ──────────────────────────────────────────────────────────────────
 
 class RouteRequest(BaseModel):
-    vehicle_id: str
-    start: str = "start"
-    end: str = "end"
-    use_osm: bool = False
+    profile: str = "fastest"            # fastest | smoothest | largevehicle
+    start: str
+    end: str
+    vehicle: dict | None = None         # dims (+ optional preset id) for largevehicle
+    live: bool = False                  # pull live Cyvl PCI/obstacles into the graph
 
 
-class SingleIntersectionRequest(BaseModel):
-    vehicle_id: str
-    intersection_id: str
-    lon: float
-    lat: float
+class VehicleSpec(BaseModel):
+    id: str | None = None
+    length_ft: float | None = None
+    width_ft: float | None = None
+    wheelbase_ft: float | None = None
+    steer_max_deg: float | None = None
+    turning_radius_ft: float | None = None
+    overhang_front_ft: float | None = None
+    track_width_ft: float | None = None
+
+
+# ── Helpers ─────────────────────────────────────────────────────────────────
+
+def _resolve_vehicle(spec: dict | None) -> dict:
+    """Merge a preset (by id) with any user-supplied overrides."""
+    spec = dict(spec or {})
+    base: dict = {}
+    if spec.get("id"):
+        templates = load_vehicle_templates()
+        base = dict(templates.get(spec["id"], {}))
+        base["id"] = spec["id"]
+    # user-supplied non-null fields win
+    for k, v in spec.items():
+        if v is not None:
+            base[k] = v
+    base.setdefault("id", "custom")
+    base.setdefault("width_ft", 8.5)
+    return base
+
+
+def _scenario_payload(sc: Scenario) -> dict:
+    return {
+        "origin": sc.origin,
+        "destinations": [
+            {"id": d, "name": sc.nodes[d]["name"], "lon": sc.nodes[d]["lon"], "lat": sc.nodes[d]["lat"]}
+            for d in sc.destinations
+        ],
+        "source": sc.source,
+        "nodes": {
+            nid: {
+                "name": n["name"], "kind": n["kind"], "lon": n["lon"], "lat": n["lat"],
+                "corner_radius_ft": n.get("corner_radius_ft"),
+                "road_width_ft": n.get("road_width_ft"),
+                "pci": n.get("pci"),
+                "pci_source": n.get("pci_source", "baked"),
+                "obstacles": n.get("obstacles", []),
+            } for nid, n in sc.nodes.items()
+        },
+        "edges": [{"a": e.a, "b": e.b, "length_m": e.length_m, "pci": e.pci} for e in sc.edges],
+    }
 
 
 # ── Reference ─────────────────────────────────────────────────────────────────
+
+@router.get("/status")
+def status():
+    return {"cyvl_connected": _USE_CYVL, "autodesk_connected": bool(os.getenv("APS_CLIENT_ID"))}
+
 
 @router.get("/vehicles")
 def get_vehicles():
     return load_vehicle_templates()
 
 
-@router.get("/intersections")
-def get_intersections(live: bool = Query(False, description="Pull from Cyvl API")):
-    if live and _USE_CYVL:
-        return load_intersections_live()
-    return load_intersections()
+@router.get("/scenario")
+def get_scenario(live: bool = Query(False, description="Enrich PCI/obstacles from Cyvl")):
+    sc = build_scenario(live=live and _USE_CYVL)
+    return _scenario_payload(sc)
 
 
-@router.get("/status")
-def status():
+# ── Turning radius (live form helper) ─────────────────────────────────────────
+
+@router.post("/turning-radius")
+def post_turning_radius(spec: VehicleSpec):
+    vehicle = _resolve_vehicle(spec.model_dump())
+    # If the user edited wheelbase/steer but not the radius, re-derive it.
+    if spec.turning_radius_ft is None and (spec.wheelbase_ft or spec.steer_max_deg):
+        vehicle.pop("turning_radius_ft", None)
+    g = turning_geometry(vehicle)
     return {
-        "cyvl_connected": _USE_CYVL,
-        "autodesk_connected": bool(os.getenv("APS_CLIENT_ID")),
-    }
-
-
-# ── Feasibility ───────────────────────────────────────────────────────────────
-
-@router.post("/feasibility")
-def feasibility(req: FeasibilityRequest):
-    vehicles = load_vehicle_templates()
-    if req.vehicle_id not in vehicles:
-        raise HTTPException(404, f"Unknown vehicle: {req.vehicle_id}")
-
-    vehicle = vehicles[req.vehicle_id]
-    vehicle["id"] = req.vehicle_id
-
-    # Use live Cyvl geometry if connected, otherwise local GeoJSON
-    if _USE_CYVL:
-        fc = load_intersections_live()
-        features = fc.get("features", [])
-        if req.intersection_ids:
-            features = [f for f in features if f["properties"].get("id") in req.intersection_ids]
-        geometries = build_all_somerville(features)
-    else:
-        fc = load_intersections()
-        features = fc["features"]
-        if req.intersection_ids:
-            features = [f for f in features if f["properties"]["id"] in req.intersection_ids]
-        geometries = [load_from_geojson(f) for f in features]
-
-    results = []
-    for geom in geometries:
-        result = compute_swept_path(geom, vehicle)
-        results.append({
-            "intersection_id": result.intersection_id,
-            "verdict": result.verdict.value,
-            "reason": result.reason,
-            "clearance_margin_ft": result.clearance_margin_ft,
-            "swept_polygon": result.swept_polygon,
-            "encroachments": geom.encroachments,
-            "clearance_height_m": geom.clearance_height_m,
-        })
-    return results
-
-
-@router.post("/feasibility/point")
-def feasibility_at_point(req: SingleIntersectionRequest):
-    """Check a single intersection by lon/lat — queries Cyvl live or stubs."""
-    vehicles = load_vehicle_templates()
-    if req.vehicle_id not in vehicles:
-        raise HTTPException(404, f"Unknown vehicle: {req.vehicle_id}")
-
-    vehicle = vehicles[req.vehicle_id]
-    vehicle["id"] = req.vehicle_id
-
-    geom = build_from_cyvl(req.intersection_id, req.lon, req.lat)
-    result = compute_swept_path(geom, vehicle)
-    return {
-        "intersection_id": result.intersection_id,
-        "verdict": result.verdict.value,
-        "reason": result.reason,
-        "clearance_margin_ft": result.clearance_margin_ft,
-        "swept_polygon": result.swept_polygon,
-        "encroachments": geom.encroachments,
-        "clearance_height_m": geom.clearance_height_m,
+        "turning_radius_ft": g.turning_radius_ft,
+        "inner_radius_ft": g.inner_radius_ft,
+        "outer_radius_ft": g.outer_radius_ft,
+        "swept_width_ft": g.swept_width_ft,
     }
 
 
 # ── Routing ───────────────────────────────────────────────────────────────────
 
 @router.post("/route")
-def get_route(req: RouteRequest):
-    vehicles = load_vehicle_templates()
-    if req.vehicle_id not in vehicles:
-        raise HTTPException(404, f"Unknown vehicle: {req.vehicle_id}")
+def post_route(req: RouteRequest):
+    if req.profile not in ("fastest", "smoothest", "largevehicle"):
+        raise HTTPException(400, f"Unknown profile: {req.profile}")
 
-    vehicle = vehicles[req.vehicle_id]
-    vehicle["id"] = req.vehicle_id
+    sc = build_scenario(live=req.live and _USE_CYVL)
+    if req.start not in sc.nodes or req.end not in sc.nodes:
+        raise HTTPException(404, "Unknown start/end node")
 
-    if _USE_CYVL:
-        fc = load_intersections_live()
-        geometries = build_all_somerville(fc.get("features", []))
-    else:
-        fc = load_intersections()
-        geometries = [load_from_geojson(f) for f in fc["features"]]
+    vehicle = None
+    if req.profile == "largevehicle":
+        vehicle = _resolve_vehicle(req.vehicle)
+        if req.vehicle and req.vehicle.get("turning_radius_ft") is None and req.vehicle.get("wheelbase_ft"):
+            vehicle.pop("turning_radius_ft", None)
+        vehicle["turning_geometry"] = turning_geometry(vehicle).__dict__
 
-    feasibility_results = [compute_swept_path(g, vehicle) for g in geometries]
+    try:
+        result = plan_route(sc, req.start, req.end, req.profile, vehicle)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
-    graph = get_graph(use_osm=req.use_osm)
-    return route(graph, req.start, req.end, feasibility_results)
+    # attach coordinates so the frontend can draw paths without a second fetch
+    result["node_coords"] = {nid: [n["lon"], n["lat"]] for nid, n in sc.nodes.items()}
+    if vehicle:
+        result["vehicle"] = {k: v for k, v in vehicle.items() if k != "turning_geometry"}
+        result["turning_geometry"] = vehicle["turning_geometry"]
+    return result
 
 
-# ── Cyvl pass-through (useful for frontend exploration) ───────────────────────
+# ── Cyvl pass-throughs (optional overlays) ────────────────────────────────────
 
 def _require_cyvl():
     if not _USE_CYVL:
         raise HTTPException(503, "CYVL_API_KEY not configured")
 
 
-def _project_id() -> str:
-    from data.cyvl_client import get_somerville_project_id
-    pid = get_somerville_project_id()
-    if not pid:
-        raise HTTPException(503, "Could not resolve Somerville project_id — set CYVL_PROJECT_ID in .env")
-    return pid
-
-
 @router.get("/cyvl/assets")
-def cyvl_assets(
-    lon: float = Query(...), lat: float = Query(...),
-    radius_deg: float = Query(0.0005),
-    asset_type: str | None = Query(None),
-):
+def cyvl_assets(lon: float = Query(...), lat: float = Query(...),
+                radius_m: float = Query(40), asset_type: str | None = Query(None)):
     _require_cyvl()
-    from data.cyvl_client import get_assets, intersection_bbox
-    return get_assets(_project_id(), intersection_bbox(lon, lat, radius_deg), asset_type=asset_type)
+    from data.cyvl_client import get_assets, radius_filter
+    from data.scenario import SOMERVILLE_PROJECT_ID
+    return get_assets(SOMERVILLE_PROJECT_ID, radius_filter(lat, lon, radius_m), asset_type=asset_type)
 
 
-@router.get("/cyvl/markings")
-def cyvl_markings(
-    lon: float = Query(...), lat: float = Query(...),
-    radius_deg: float = Query(0.0005),
-):
+@router.get("/cyvl/pavement")
+def cyvl_pavement(lon: float = Query(...), lat: float = Query(...), radius_m: float = Query(60)):
     _require_cyvl()
-    from data.cyvl_client import get_markings, intersection_bbox
-    return get_markings(_project_id(), intersection_bbox(lon, lat, radius_deg))
-
-
-@router.post("/cyvl/image-search")
-def cyvl_image_search(body: dict):
-    _require_cyvl()
-    from data.cyvl_client import search_images
-    pid = os.getenv("CYVL_PROJECT_ID")
-    return search_images(body.get("query", ""), project_id=pid, page_size=body.get("page_size", 20))
+    from data.cyvl_client import get_pavement_scores, radius_filter
+    from data.scenario import SOMERVILLE_PROJECT_ID
+    return get_pavement_scores(SOMERVILLE_PROJECT_ID, radius_filter(lat, lon, radius_m))
