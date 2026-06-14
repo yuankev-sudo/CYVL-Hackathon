@@ -1,3 +1,0 @@
-# simple processing scirpt
-
-

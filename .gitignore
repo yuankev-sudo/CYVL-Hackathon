@@ -8,3 +8,11 @@ data/.cache/
 
 # generated imagery thumbnail cache
 data/.thumb_cache/
+
+# generated graph sample outputs
+data/somerville_graph_sample.geojson
+data/*.geojson
+
+# node (aps viewer is a submodule; no root node packages)
+node_modules/
+package-lock.json
