@@ -12,6 +12,14 @@ under one of three profiles:
   dimensions (or pick an AASHTO preset); the turning radius is derived from the
   wheelbase and drives the per-turn feasibility check.
 
+## Screenshots
+
+![Main Web Page](CYVL-Hack/Main%20Web%20Page.png)
+
+![LiDAR Demo Segment](CYVL-Hack/Lidar%20Demo%20Segment.png)
+
+![LiDAR Point Cloud](CYVL-Hack/Lidar%20Point%20Cloud%20.png)
+
 ## Quick start
 
 ```bash
