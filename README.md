@@ -1,5 +1,7 @@
 # ClearPath
 
+> 🏆 **2nd Place — CYVL Hackathon** | $3,000 prize
+
 Profile-aware routing for large vehicles, off **measured pavement reality** —
 not a reported-restriction database. Pick a start and end on a map of
 Somerville, MA (built from Cyvl LiDAR centerline + pavement data) and route
